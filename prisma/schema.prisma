@@ -1,0 +1,53 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/**
+ * The pack catalog. Pack definitions live in src/lib/packs.ts (code is the
+ * source of truth) and are seeded here lazily — this table is what grows
+ * into the Supabase-hosted marketplace catalog later.
+ */
+model Pack {
+  id          String          @id // slug, e.g. "beginner-robot-pack"
+  name        String
+  tagline     String
+  description String
+  icon        String
+  sizeMb      Float
+  priceLabel  String
+  level       String
+  featured    Boolean         @default(false)
+  sortOrder   Int             @default(0)
+  components  PackComponent[]
+  installs    Install[]
+}
+
+/** Pack membership — which components a pack unlocks. */
+model PackComponent {
+  id          Int    @id @default(autoincrement())
+  packId      String
+  componentId String
+  pack        Pack   @relation(fields: [packId], references: [id], onDelete: Cascade)
+
+  @@unique([packId, componentId])
+}
+
+/** A pack installed by a visitor. Today keyed by an anonymous session cookie;
+ *  later re-keyed to a user account when auth ships (Supabase migration). */
+model Install {
+  id          String   @id @default(cuid())
+  sessionId   String
+  packId      String
+  installedAt DateTime @default(now())
+  pack        Pack     @relation(fields: [packId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, packId])
+}

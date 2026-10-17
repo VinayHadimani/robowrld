@@ -1,0 +1,672 @@
+     1→'use client'
+     2→
+     3→import { useCallback, useEffect, useRef, useState } from 'react'
+     4→import dynamic from 'next/dynamic'
+     5→import {
+     6→  ArrowLeft,
+     7→  Bot,
+     8→  Check,
+     9→  ChevronRight,
+    10→  Circle,
+    11→  Copy,
+    12→  Gauge,
+    13→  Hand,
+    14→  Link2,
+    15→  MousePointer2,
+    16→  MoveHorizontal,
+    17→  MoveRight,
+    18→  Orbit,
+    19→  RotateCw,
+    20→} from 'lucide-react'
+    21→import { Badge } from '@/components/ui/badge'
+    22→import { Button } from '@/components/ui/button'
+    23→import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+    24→import { Label } from '@/components/ui/label'
+    25→import { Separator } from '@/components/ui/separator'
+    26→import { Slider } from '@/components/ui/slider'
+    27→import { Switch } from '@/components/ui/switch'
+    28→import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+    29→import { PwmWaveform } from '@/components/three/PwmWaveform'
+    30→import type { HornType } from '@/components/three/ServoMotor'
+    31→import { PORT_KIND_LABEL, SERVO_MODEL } from '@/lib/connections'
+    32→import { useToast } from '@/hooks/use-toast'
+    33→import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
+    34→import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
+    35→
+    36→const ServoStage = dynamic(() => import('@/components/three/ServoStage'), {
+    37→  ssr: false,
+    38→  loading: () => (
+    39→    <div className="flex h-full min-h-[420px] items-center justify-center text-sm text-muted-foreground">
+    40→      Loading 3D model…
+    41→    </div>
+    42→  ),
+    43→})
+    44→
+    45→/* ------------------------------------------------------------------ */
+    46→/* Data                                                                */
+    47→/* ------------------------------------------------------------------ */
+    48→
+    49→const BODY_COLORS = [
+    50→  { id: 'classic', name: 'Classic Blue', value: '#1c56b2' },
+    51→  { id: 'midnight', name: 'Midnight Black', value: '#181a20' },
+    52→  { id: 'alpine', name: 'Alpine White', value: '#e9e7df' },
+    53→]
+    54→
+    55→const ANGLE_PRESETS = [0, 45, 90, 135, 180]
+    56→
+    57→const SPECS: Array<[string, string]> = [
+    58→  ['Operating voltage', '4.8 – 7.2 V DC'],
+    59→  ['Stall torque', '9.4 kg·cm @ 4.8 V · 11 kg·cm @ 6 V'],
+    60→  ['Travel speed', '0.17 s / 60° @ 4.8 V'],
+    61→  ['Rotation range', '~180° (commandable 0 – 180°)'],
+    62→  ['Control signal', 'PWM @ 50 Hz · 0.5 – 2.5 ms pulse'],
+    63→  ['Gear train', 'All-metal, dual ball bearing output'],
+    64→  ['Dimensions', '40.7 × 19.7 × 42.9 mm'],
+    65→  ['Weight', '55 g (typical)'],
+    66→  ['Cable', '300 mm, 3-pin (S · +V · GND)'],
+    67→]
+    68→
+    69→const PINOUT = [
+    70→  { color: '#f0801e', name: 'Orange', pin: 'Signal', detail: 'PWM input · 50 Hz · 0.5–2.5 ms' },
+    71→  { color: '#c33131', name: 'Red', pin: 'V+', detail: '4.8 – 7.2 V motor supply' },
+    72→  { color: '#5d3a21', name: 'Brown', pin: 'GND', detail: 'Common ground with controller' },
+    73→]
+    74→
+    75→const USAGE_CODE = `import { ServoMotor } from "@/components/three/ServoMotor"
+    76→
+    77→// 1 — Drop it into any React Three Fiber canvas.
+    78→//     No model files, no assets, fully procedural:
+    79→<Canvas camera={{ position: [7.6, 5.6, 9.8], fov: 34 }}>
+    80→  <ambientLight intensity={0.4} />
+    81→  <directionalLight position={[5, 9, 6]} intensity={2.3} />
+    82→  <ServoMotor angle={90} hornType="single" interactive />
+    83→</Canvas>
+    84→
+    85→// 2 — Drive it like a real servo: change the angle
+    86→//     prop and the horn tracks it at \`speed\` deg/s.
+    87→setAngle(180)
+    88→
+    89→// 3 — Bolt it into a mechanism: stream its true shaft
+    90→//     angle to a linkage solver (see the Assembly Lab):
+    91→const shaft = useRef(90)
+    92→<ServoMotor liveAngleRef={shaft} showHorn={false} />`
+    93→
+    94→const API_PROPS: Array<{ prop: string; type: string; def: string; note: string }> = [
+    95→  { prop: 'angle', type: 'number', def: '90', note: 'Commanded angle, 0–180°' },
+    96→  { prop: 'speed', type: 'number', def: '400', note: 'Max travel speed, °/s' },
+    97→  { prop: 'hornType', type: '"single" | "double" | "round"', def: '"single"', note: 'Output horn style' },
+    98→  { prop: 'bodyColor', type: 'string', def: '#1c56b2', note: 'Case color (CSS)' },
+    99→  { prop: 'showHorn / showCable / showLabels', type: 'boolean', def: 'true / true / false', note: 'Toggle sub-parts' },
+   100→  { prop: 'showPorts', type: 'boolean', def: 'false', note: 'Render connection-port markers + DOF arc' },
+   101→  { prop: 'interactive', type: 'boolean', def: 'false', note: 'Pointer-drag the horn' },
+   102→  { prop: 'grabRadius / grabY', type: 'number', def: '1.06 / 5.32', note: 'Grab volume size & height (rigged cranks)' },
+   103→  { prop: 'autoSweep', type: '{ min, max, speed } | false', def: 'false', note: 'Built-in sweep animation' },
+   104→  { prop: 'onAngleChange', type: '(deg) => void', def: '—', note: 'Fires while dragging' },
+   105→  { prop: 'liveAngleRef', type: '{ current: number }', def: '—', note: 'Streams the true shaft angle every frame' },
+   106→]
+   107→
+   108→const STUDIO_BG =
+   109→  'radial-gradient(ellipse at 50% 30%, #ffffff 0%, #f0f2f6 55%, #e2e5ea 100%)'
+   110→
+   111→const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v))
+   112→
+   113→/* ------------------------------------------------------------------ */
+   114→/* Component                                                           */
+   115→/* ------------------------------------------------------------------ */
+   116→
+   117→export function ServoDetail({ onBack, onOpenLab }: { onBack: () => void; onOpenLab: () => void }) {
+   118→  const [angle, setAngle] = useState(90)
+   119→  const angleRef = useRef(90)
+   120→  const [speed, setSpeed] = useState(400)
+   121→  const [sweep, setSweep] = useState(false)
+   122→  const [hornType, setHornType] = useState<HornType>('single')
+   123→  const [bodyColor, setBodyColor] = useState(BODY_COLORS[0].value)
+   124→  const [showCable, setShowCable] = useState(true)
+   125→  const [showLabels, setShowLabels] = useState(false)
+   126→  const [showPorts, setShowPorts] = useState(false)
+   127→  const [autoRotate, setAutoRotate] = useState(false)
+   128→  const [dragging, setDragging] = useState(false)
+   129→  const [copied, setCopied] = useState(false)
+   130→  const { toast } = useToast()
+   131→
+   132→  const pulseMs = 0.5 + (angle / 180) * 2
+   133→  const duty = (pulseMs / 20) * 100
+   134→
+   135→  const setAngleBoth = useCallback((a: number) => {
+   136→    angleRef.current = a
+   137→    setAngle(a)
+   138→  }, [])
+   139→
+   140→  /* Sweep generator — updates the commanded angle ~25 times per second;
+   141→     the servo component itself smooths the motion at its speed limit. */
+   142→  useEffect(() => {
+   143→    if (!sweep) return
+   144→    let raf = 0
+   145→    let last = performance.now()
+   146→    let acc = 0
+   147→    let dir = 1
+   148→    const tick = (t: number) => {
+   149→      const dt = Math.min((t - last) / 1000, 0.06)
+   150→      last = t
+   151→      acc += dt
+   152→      if (acc >= 0.04) {
+   153→        const next = clamp(angleRef.current + dir * speed * acc, 0, 180)
+   154→        if (next === 180) dir = -1
+   155→        else if (next === 0) dir = 1
+   156→        acc = 0
+   157→        angleRef.current = next
+   158→        setAngle(next)
+   159→      }
+   160→      raf = requestAnimationFrame(tick)
+   161→    }
+   162→    raf = requestAnimationFrame(tick)
+   163→    return () => cancelAnimationFrame(raf)
+   164→  }, [sweep, speed])
+   165→
+   166→  const handleDragState = useCallback(
+   167→    (d: boolean) => {
+   168→      setDragging(d)
+   169→      if (d && sweep) setSweep(false) // grabbing the horn cancels sweep
+   170→    },
+   171→    [sweep]
+   172→  )
+   173→
+   174→  const copyCode = async () => {
+   175→    try {
+   176→      await navigator.clipboard.writeText(USAGE_CODE)
+   177→      setCopied(true)
+   178→      setTimeout(() => setCopied(false), 2000)
+   179→    } catch {
+   180→      toast({ title: 'Copy failed', description: 'Clipboard is not available in this context.' })
+   181→    }
+   182→  }
+   183→
+   184→  return (
+   185→    <div className="mx-auto w-full max-w-7xl px-4 pb-16 pt-6 sm:px-6 lg:px-8">
+   186→      {/* Back + breadcrumb */}
+   187→      <div className="flex items-center gap-2 text-sm">
+   188→        <Button variant="ghost" size="sm" className="gap-1.5 px-2 font-medium" onClick={onBack}>
+   189→          <ArrowLeft className="h-4 w-4" />
+   190→          Library
+   191→        </Button>
+   192→        <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
+   193→        <span className="text-muted-foreground">Actuators</span>
+   194→        <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
+   195→        <span className="font-medium">Servo Motor</span>
+   196→      </div>
+   197→
+   198→      {/* Title */}
+   199→      <div className="mt-4 flex flex-wrap items-center gap-3">
+   200→        <h1 className="text-3xl font-bold tracking-tight">Servo Motor</h1>
+   201→        <Badge variant="secondary" className="font-medium">Actuators</Badge>
+   202→        <Badge className="gap-1 border-amber-200 bg-amber-50 font-medium text-amber-700 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">
+   203→          <RotateCw className="h-3 w-3" />
+   204→          Interactive 3D
+   205→        </Badge>
+   206→        <Badge variant="outline" className="gap-1 font-medium text-muted-foreground">
+   207→          <Link2 className="h-3 w-3" />
+   208→          {SERVO_MODEL.ports.length} ports · {SERVO_MODEL.dof.length} DOF
+   209→        </Badge>
+   210→        <Button variant="outline" size="sm" className="ml-auto gap-1.5 font-medium" onClick={onOpenLab}>
+   211→          <Bot className="h-4 w-4 text-amber-500" />
+   212→          Open in Assembly Lab
+   213→        </Button>
+   214→      </div>
+   215→      <p className="mt-3 max-w-3xl leading-relaxed text-muted-foreground">
+   216→        A servo motor is a rotary actuator that rotates to a commanded position and actively
+   217→        holds it there using closed-loop feedback from an internal potentiometer. It is
+   218→        driven by a PWM signal — at 50 Hz, a 0.5 ms pulse commands 0° and a 2.5 ms pulse
+   219→        commands 180°. This replica is modeled procedurally after a metal-gear hobby servo:
+   220→        drag the horn with your pointer, sweep it back and forth, swap horns and colors, and
+   221→        watch the control signal respond in real time.
+   222→      </p>
+   223→
+   224→      {/* Viewer + controls */}
+   225→      <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
+   226→        {/* 3D viewer */}
+   227→        <Card className="relative overflow-hidden p-0">
+   228→          <div className="relative h-[420px] w-full sm:h-[520px] lg:h-[600px]" style={{ background: STUDIO_BG }}>
+   229→            <ServoStage
+   230→              angle={angle}
+   231→              speed={speed}
+   232→              bodyColor={bodyColor}
+   233→              hornType={hornType}
+   234→              showCable={showCable}
+   235→              showLabels={showLabels}
+   236→              showPorts={showPorts}
+   237→              interactive
+   238→              autoRotate={autoRotate}
+   239→              onAngleChange={setAngleBoth}
+   240→              onDragStateChange={handleDragState}
+   241→            />
+   242→
+   243→            {/* Angle HUD */}
+   244→            <div className="pointer-events-none absolute right-3 top-3 rounded-xl border border-zinc-200 bg-white/85 px-3.5 py-2.5 text-right shadow-sm backdrop-blur dark:border-zinc-700 dark:bg-zinc-900/85">
+   245→              <div className="font-mono text-2xl font-bold tabular-nums leading-none text-zinc-900 dark:text-zinc-50">
+   246→                {Math.round(angle)}
+   247→                <span className="text-sm font-medium text-muted-foreground">°</span>
+   248→              </div>
+   249→              <div className="mt-1 font-mono text-[11px] tabular-nums text-muted-foreground">
+   250→                pulse {pulseMs.toFixed(2)} ms
+   251→              </div>
+   252→            </div>
+   253→
+   254→            {/* Drag state badge */}
+   255→            {dragging && (
+   256→              <div className="pointer-events-none absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-amber-500 px-3 py-1 text-[11px] font-semibold text-white shadow-md">
+   257→                <Hand className="h-3 w-3" />
+   258→                Driving servo…
+   259→              </div>
+   260→            )}
+   261→
+   262→            {/* Interaction hint */}
+   263→            <div className="pointer-events-none absolute bottom-3 left-1/2 flex -translate-x-1/2 flex-wrap items-center justify-center gap-x-3 gap-y-1 rounded-full border border-zinc-200/70 bg-white/80 px-4 py-1.5 text-[11px] font-medium text-zinc-500 shadow-sm backdrop-blur dark:border-zinc-700 dark:bg-zinc-900/80 dark:text-zinc-400">
+   264→              <span className="inline-flex items-center gap-1">
+   265→                <Orbit className="h-3 w-3" /> Drag background to orbit
+   266→              </span>
+   267→              <span className="inline-flex items-center gap-1">
+   268→                <MousePointer2 className="h-3 w-3" /> Drag the horn to steer
+   269→              </span>
+   270→              <span className="hidden items-center gap-1 sm:inline-flex">
+   271→                <Gauge className="h-3 w-3" /> Scroll to zoom
+   272→              </span>
+   273→            </div>
+   274→          </div>
+   275→        </Card>
+   276→
+   277→        {/* Control panel */}
+   278→        <div className="flex flex-col gap-4">
+   279→          {/* Position */}
+   280→          <Card>
+   281→            <CardHeader className="pb-3">
+   282→              <CardTitle className="flex items-center gap-2 text-base">
+   283→                <MoveHorizontal className="h-4 w-4 text-amber-500" />
+   284→                Position control
+   285→              </CardTitle>
+   286→              <CardDescription>Command the output shaft, 0–180°.</CardDescription>
+   287→            </CardHeader>
+   288→            <CardContent className="flex flex-col gap-4">
+   289→              <div className="flex items-baseline justify-between">
+   290→                <Label htmlFor="angle-slider" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+   291→                  Angle
+   292→                </Label>
+   293→                <span className="font-mono text-lg font-semibold tabular-nums">{Math.round(angle)}°</span>
+   294→              </div>
+   295→              <Slider
+   296→                id="angle-slider"
+   297→                value={[angle]}
+   298→                min={0}
+   299→                max={180}
+   300→                step={1}
+   301→                onValueChange={([v]) => setAngleBoth(v)}
+   302→                aria-label="Servo angle"
+   303→              />
+   304→              <div className="flex justify-between text-[10px] font-medium text-muted-foreground">
+   305→                <span>0°</span>
+   306→                <span>90°</span>
+   307→                <span>180°</span>
+   308→              </div>
+   309→              <div className="grid grid-cols-5 gap-1.5">
+   310→                {ANGLE_PRESETS.map((p) => (
+   311→                  <Button
+   312→                    key={p}
+   313→                    variant={Math.round(angle) === p ? 'default' : 'outline'}
+   314→                    size="sm"
+   315→                    className="h-8 px-0 font-mono text-xs tabular-nums"
+   316→                    onClick={() => setAngleBoth(p)}
+   317→                    aria-label={`Set angle to ${p} degrees`}
+   318→                  >
+   319→                    {p}°
+   320→                  </Button>
+   321→                ))}
+   322→              </div>
+   323→
+   324→              <Separator />
+   325→
+   326→              {/* PWM scope */}
+   327→              <div className="flex flex-col gap-2">
+   328→                <div className="flex items-center justify-between">
+   329→                  <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+   330→                    PWM control signal
+   331→                  </span>
+   332→                  <span className="inline-flex items-center gap-1 text-[10px] font-medium text-muted-foreground">
+   333→                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" />
+   334→                    live
+   335→                  </span>
+   336→                </div>
+   337→                <PwmWaveform angle={angle} />
+   338→                <div className="grid grid-cols-3 gap-2 text-center">
+   339→                  <div className="rounded-md bg-muted px-2 py-1.5">
+   340→                    <div className="font-mono text-sm font-semibold tabular-nums">50 Hz</div>
+   341→                    <div className="text-[10px] text-muted-foreground">frequency</div>
+   342→                  </div>
+   343→                  <div className="rounded-md bg-muted px-2 py-1.5">
+   344→                    <div className="font-mono text-sm font-semibold tabular-nums">{pulseMs.toFixed(2)} ms</div>
+   345→                    <div className="text-[10px] text-muted-foreground">pulse width</div>
+   346→                  </div>
+   347→                  <div className="rounded-md bg-muted px-2 py-1.5">
+   348→                    <div className="font-mono text-sm font-semibold tabular-nums">{duty.toFixed(1)}%</div>
+   349→                    <div className="text-[10px] text-muted-foreground">duty cycle</div>
+   350→                  </div>
+   351→                </div>
+   352→              </div>
+   353→            </CardContent>
+   354→          </Card>
+   355→
+   356→          {/* Motion */}
+   357→          <Card>
+   358→            <CardHeader className="pb-3">
+   359→              <CardTitle className="flex items-center gap-2 text-base">
+   360→                <Gauge className="h-4 w-4 text-amber-500" />
+   361→                Motion
+   362→              </CardTitle>
+   363→              <CardDescription>Sweep back and forth, or cap the travel speed.</CardDescription>
+   364→            </CardHeader>
+   365→            <CardContent className="flex flex-col gap-4">
+   366→              <div className="flex items-center justify-between rounded-lg border px-3 py-2.5">
+   367→                <div>
+   368→                  <Label htmlFor="sweep-switch" className="text-sm font-medium">
+   369→                    Sweep mode
+   370→                  </Label>
+   371→                  <p className="text-xs text-muted-foreground">Oscillate 0° ↔ 180° continuously</p>
+   372→                </div>
+   373→                <Switch id="sweep-switch" checked={sweep} onCheckedChange={setSweep} />
+   374→              </div>
+   375→              <div className="flex flex-col gap-2">
+   376→                <div className="flex items-baseline justify-between">
+   377→                  <Label htmlFor="speed-slider" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+   378→                    Travel speed
+   379→                  </Label>
+   380→                  <span className="font-mono text-sm font-semibold tabular-nums">{speed} °/s</span>
+   381→                </div>
+   382→                <Slider
+   383→                  id="speed-slider"
+   384→                  value={[speed]}
+   385→                  min={60}
+   386→                  max={600}
+   387→                  step={10}
+   388→                  onValueChange={([v]) => setSpeed(v)}
+   389→                  aria-label="Servo travel speed"
+   390→                />
+   391→                <div className="flex justify-between text-[10px] font-medium text-muted-foreground">
+   392→                  <span>sluggish 60</span>
+   393→                  <span>fast 600</span>
+   394→                </div>
+   395→              </div>
+   396→            </CardContent>
+   397→          </Card>
+   398→
+   399→          {/* Model options */}
+   400→          <Card>
+   401→            <CardHeader className="pb-3">
+   402→              <CardTitle className="flex items-center gap-2 text-base">
+   403→                <Circle className="h-4 w-4 text-amber-500" />
+   404→                Model options
+   405→              </CardTitle>
+   406→              <CardDescription>All of these are props on the reusable component.</CardDescription>
+   407→            </CardHeader>
+   408→            <CardContent className="flex flex-col gap-4">
+   409→              <div className="flex flex-col gap-2">
+   410→                <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Horn type</span>
+   411→                <div className="grid grid-cols-3 gap-1.5">
+   412→                  {(
+   413→                    [
+   414→                      { id: 'single', label: 'Single', icon: MoveRight },
+   415→                      { id: 'double', label: 'Double', icon: MoveHorizontal },
+   416→                      { id: 'round', label: 'Round', icon: Circle },
+   417→                    ] as Array<{ id: HornType; label: string; icon: typeof Circle }>
+   418→                  ).map((h) => (
+   419→                    <Button
+   420→                      key={h.id}
+   421→                      variant={hornType === h.id ? 'default' : 'outline'}
+   422→                      size="sm"
+   423→                      className="h-9 flex-col gap-0.5 text-[11px]"
+   424→                      onClick={() => setHornType(h.id)}
+   425→                      aria-pressed={hornType === h.id}
+   426→                    >
+   427→                      <h.icon className="h-4 w-4" />
+   428→                      {h.label}
+   429→                    </Button>
+   430→                  ))}
+   431→                </div>
+   432→              </div>
+   433→
+   434→              <div className="flex flex-col gap-2">
+   435→                <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Body color</span>
+   436→                <div className="flex items-center gap-2">
+   437→                  {BODY_COLORS.map((c) => (
+   438→                    <button
+   439→                      key={c.id}
+   440→                      onClick={() => setBodyColor(c.value)}
+   441→                      title={c.name}
+   442→                      aria-label={`Body color ${c.name}`}
+   443→                      aria-pressed={bodyColor === c.value}
+   444→                      className={`h-8 w-8 rounded-full border shadow-sm transition-transform hover:scale-110 ${
+   445→                        bodyColor === c.value ? 'ring-2 ring-amber-500 ring-offset-2 dark:ring-offset-zinc-950' : ''
+   446→                      }`}
+   447→                      style={{ backgroundColor: c.value }}
+   448→                    />
+   449→                  ))}
+   450→                  <span className="ml-1 text-xs text-muted-foreground">{BODY_COLORS.find((c) => c.value === bodyColor)?.name}</span>
+   451→                </div>
+   452→              </div>
+   453→
+   454→              <Separator />
+   455→
+   456→              <div className="flex flex-col gap-3">
+   457→                {(
+   458→                  [
+   459→                    { id: 'cable', label: 'Cable & connector', desc: '3-wire lead with pins', value: showCable, set: setShowCable },
+   460→                    { id: 'labels', label: 'Part labels', desc: 'Annotate the anatomy', value: showLabels, set: setShowLabels },
+   461→                    { id: 'ports', label: 'Connection ports', desc: 'Show the 7 interfaces + DOF arc', value: showPorts, set: setShowPorts },
+   462→                    { id: 'rotate', label: 'Turntable', desc: 'Auto-rotate the camera', value: autoRotate, set: setAutoRotate },
+   463→                  ] as Array<{ id: string; label: string; desc: string; value: boolean; set: (v: boolean) => void }>
+   464→                ).map((t) => (
+   465→                  <div key={t.id} className="flex items-center justify-between">
+   466→                    <div>
+   467→                      <Label htmlFor={`switch-${t.id}`} className="text-sm font-medium">
+   468→                        {t.label}
+   469→                      </Label>
+   470→                      <p className="text-xs text-muted-foreground">{t.desc}</p>
+   471→                    </div>
+   472→                    <Switch id={`switch-${t.id}`} checked={t.value} onCheckedChange={t.set} />
+   473→                  </div>
+   474→                ))}
+   475→              </div>
+   476→            </CardContent>
+   477→          </Card>
+   478→        </div>
+   479→      </div>
+   480→
+   481→      {/* Specs / pinout / usage */}
+   482→      <div className="mt-6 grid gap-6 lg:grid-cols-3">
+   483→        <Card>
+   484→          <CardHeader>
+   485→            <CardTitle className="text-base">Specifications</CardTitle>
+   486→            <CardDescription>Metal-gear hobby class (MG996R reference).</CardDescription>
+   487→          </CardHeader>
+   488→          <CardContent>
+   489→            <Table>
+   490→              <TableBody>
+   491→                {SPECS.map(([k, v]) => (
+   492→                  <TableRow key={k}>
+   493→                    <TableCell className="py-2.5 pl-0 font-medium">{k}</TableCell>
+   494→                    <TableCell className="py-2.5 text-right text-muted-foreground">{v}</TableCell>
+   495→                  </TableRow>
+   496→                ))}
+   497→              </TableBody>
+   498→            </Table>
+   499→          </CardContent>
+   500→        </Card>
+   501→
+   502→        <Card>
+   503→          <CardHeader>
+   504→            <CardTitle className="text-base">Pinout &amp; wiring</CardTitle>
+   505→            <CardDescription>Standard 3-pin servo lead.</CardDescription>
+   506→          </CardHeader>
+   507→          <CardContent className="flex flex-col gap-3">
+   508→            {PINOUT.map((p) => (
+   509→              <div key={p.pin} className="flex items-center gap-3 rounded-lg border px-3 py-2.5">
+   510→                <span className="h-4 w-4 shrink-0 rounded-full border border-black/10 shadow-inner" style={{ backgroundColor: p.color }} />
+   511→                <div className="min-w-0 flex-1">
+   512→                  <div className="flex items-baseline gap-2">
+   513→                    <span className="text-sm font-semibold">{p.pin}</span>
+   514→                    <span className="text-xs text-muted-foreground">{p.name}</span>
+   515→                  </div>
+   516→                  <p className="truncate text-xs text-muted-foreground">{p.detail}</p>
+   517→                </div>
+   518→              </div>
+   519→            ))}
+   520→            <p className="text-xs leading-relaxed text-muted-foreground">
+   521→              Tip: always share a common ground between the servo supply and the
+   522→              microcontroller, or the PWM reference will float and the servo will jitter.
+   523→            </p>
+   524→          </CardContent>
+   525→        </Card>
+   526→
+   527→        <Card className="flex flex-col">
+   528→          <CardHeader>
+   529→            <div className="flex items-center justify-between">
+   530→              <div>
+   531→                <CardTitle className="text-base">Reuse it</CardTitle>
+   532→                <CardDescription>The 3D part is a single React component.</CardDescription>
+   533→              </div>
+   534→              <Button variant="outline" size="sm" className="gap-1.5" onClick={copyCode}>
+   535→                {copied ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+   536→                {copied ? 'Copied' : 'Copy'}
+   537→              </Button>
+   538→            </div>
+   539→          </CardHeader>
+   540→          <CardContent className="flex-1">
+   541→            <div className="overflow-auto rounded-lg" style={{ maxHeight: 340 }}>
+   542→              <SyntaxHighlighter
+   543→                language="tsx"
+   544→                style={oneDark}
+   545→                codeTagProps={{ className: 'font-mono text-[11px] leading-relaxed' }}
+   546→                customStyle={{ margin: 0, borderRadius: 8, fontSize: 11.5, padding: '14px 16px', background: '#18181b' }}
+   547→              >
+   548→                {USAGE_CODE}
+   549→              </SyntaxHighlighter>
+   550→            </div>
+   551→          </CardContent>
+   552→        </Card>
+   553→      </div>
+   554→
+   555→      {/* Connection interfaces — the assembly-ready contract */}
+   556→      <Card className="mt-6">
+   557→        <CardHeader>
+   558→          <div className="flex flex-wrap items-center justify-between gap-3">
+   559→            <div>
+   560→              <CardTitle className="flex items-center gap-2 text-base">
+   561→                <Link2 className="h-4 w-4 text-amber-500" />
+   562→                Connection interfaces
+   563→              </CardTitle>
+   564→              <CardDescription>
+   565→                The declared ports of this component — what future parts bolt onto.
+   566→              </CardDescription>
+   567→            </div>
+   568→            <Button variant="outline" size="sm" className="gap-1.5 font-medium" onClick={onOpenLab}>
+   569→              <Bot className="h-4 w-4 text-amber-500" />
+   570→              See them working in the Assembly Lab
+   571→            </Button>
+   572→          </div>
+   573→        </CardHeader>
+   574→        <CardContent className="flex flex-col gap-6 lg:flex-row">
+   575→          <div className="min-w-0 flex-1">
+   576→            <Table>
+   577→              <TableHeader>
+   578→                <TableRow>
+   579→                  <TableHead className="pl-0">Port</TableHead>
+   580→                  <TableHead>Kind</TableHead>
+   581→                  <TableHead>Position (local)</TableHead>
+   582→                  <TableHead className="pr-0 text-right">Spec</TableHead>
+   583→                </TableRow>
+   584→              </TableHeader>
+   585→              <TableBody>
+   586→                {SERVO_MODEL.ports.map((p) => (
+   587→                  <TableRow key={p.id}>
+   588→                    <TableCell className="py-2.5 pl-0 font-mono text-xs font-semibold">{p.id}</TableCell>
+   589→                    <TableCell className="py-2.5 text-xs text-muted-foreground">{PORT_KIND_LABEL[p.kind]}</TableCell>
+   590→                    <TableCell className="py-2.5 font-mono text-xs text-muted-foreground">
+   591→                      [{p.position.map((v) => v.toFixed(2)).join(', ')}]
+   592→                    </TableCell>
+   593→                    <TableCell className="py-2.5 pr-0 text-right text-xs text-muted-foreground">{p.spec}</TableCell>
+   594→                  </TableRow>
+   595→                ))}
+   596→              </TableBody>
+   597→            </Table>
+   598→          </div>
+   599→          <div className="flex w-full shrink-0 flex-col gap-3 lg:w-[300px]">
+   600→            {SERVO_MODEL.dof.map((d) => (
+   601→              <div key={d.id} className="rounded-lg border bg-muted/40 p-4">
+   602→                <div className="flex items-center gap-2 text-sm font-semibold">
+   603→                  <RotateCw className="h-3.5 w-3.5 text-amber-500" />
+   604→                  {d.label}
+   605→                  <Badge variant="outline" className="ml-auto font-mono text-[10px]">{d.kind}</Badge>
+   606→                </div>
+   607→                <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+   608→                  <div className="rounded-md bg-background px-2.5 py-1.5">
+   609→                    <div className="text-[10px] text-muted-foreground">axis</div>
+   610→                    <div className="font-mono font-semibold">[{d.axis.join(', ')}]</div>
+   611→                  </div>
+   612→                  <div className="rounded-md bg-background px-2.5 py-1.5">
+   613→                    <div className="text-[10px] text-muted-foreground">range</div>
+   614→                    <div className="font-mono font-semibold">{d.range[0]}° – {d.range[1]}°</div>
+   615→                  </div>
+   616→                </div>
+   617→                <p className="mt-2.5 text-[11px] leading-relaxed text-muted-foreground">
+   618→                  Driven through the <span className="font-mono">{d.driverPortId}</span> port; the
+   619→                  true angle streams via <span className="font-mono">liveAngleRef</span> so attached
+   620→                  mechanisms stay in sync every frame.
+   621→                </p>
+   622→              </div>
+   623→            ))}
+   624→            <p className="text-xs leading-relaxed text-muted-foreground">
+   625→              Ports are pure data (<span className="font-mono text-[11px]">src/lib/connections.ts</span>),
+   626→              rendered by the model itself — a future assembly builder snaps any two compatible
+   627→              ports together and the parts align automatically.
+   628→            </p>
+   629→          </div>
+   630→        </CardContent>
+   631→      </Card>
+   632→
+   633→      {/* Reusable API */}
+   634→      <Card className="mt-6">
+   635→        <CardHeader>
+   636→          <CardTitle className="text-base">
+   637→            ServoMotor&nbsp;
+   638→            <span className="font-mono text-sm font-normal text-muted-foreground">props</span>
+   639→          </CardTitle>
+   640→          <CardDescription>
+   641→            Every control on this page is a prop — the model is fully reusable in any
+   642→            React Three Fiber scene.
+   643→          </CardDescription>
+   644→        </CardHeader>
+   645→        <CardContent>
+   646→          <Table>
+   647→            <TableHeader>
+   648→              <TableRow>
+   649→                <TableHead className="pl-0">Prop</TableHead>
+   650→                <TableHead>Type</TableHead>
+   651→                <TableHead>Default</TableHead>
+   652→                <TableHead className="pr-0 text-right">Description</TableHead>
+   653→              </TableRow>
+   654→            </TableHeader>
+   655→            <TableBody>
+   656→              {API_PROPS.map((p) => (
+   657→                <TableRow key={p.prop}>
+   658→                  <TableCell className="py-2.5 pl-0 font-mono text-xs font-semibold">{p.prop}</TableCell>
+   659→                  <TableCell className="py-2.5 font-mono text-xs text-muted-foreground">{p.type}</TableCell>
+   660→                  <TableCell className="py-2.5 font-mono text-xs text-muted-foreground">{p.def}</TableCell>
+   661→                  <TableCell className="py-2.5 pr-0 text-right text-muted-foreground">{p.note}</TableCell>
+   662→                </TableRow>
+   663→              ))}
+   664→            </TableBody>
+   665→          </Table>
+   666→        </CardContent>
+   667→      </Card>
+   668→    </div>
+   669→  )
+   670→}
+   671→
+   672→

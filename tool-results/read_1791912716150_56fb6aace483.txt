@@ -1,0 +1,647 @@
+     1→'use client'
+     2→
+     3→import { useCallback, useEffect, useMemo, useState } from 'react'
+     4→import dynamic from 'next/dynamic'
+     5→import {
+     6→  ArrowRight,
+     7→  Bot,
+     8→  BatteryCharging,
+     9→  Check,
+    10→  Clock3,
+    11→  Download,
+    12→  Link2,
+    13→  Lock,
+    14→  Package,
+    15→  Radar,
+    16→  RotateCw,
+    17→  Search,
+    18→  Sparkles,
+    19→  Trash2,
+    20→  Weight,
+    21→} from 'lucide-react'
+    22→import { Card, CardContent } from '@/components/ui/card'
+    23→import { Badge } from '@/components/ui/badge'
+    24→import { Button } from '@/components/ui/button'
+    25→import { Input } from '@/components/ui/input'
+    26→import { Progress } from '@/components/ui/progress'
+    27→import { useToast } from '@/hooks/use-toast'
+    28→import { CATEGORIES, LIBRARY, type ComponentCategory } from '@/lib/registry'
+    29→import { getComponent } from '@/lib/component-schema'
+    30→import type { PackState } from '@/lib/packs'
+    31→
+    32→const ServoStage = dynamic(() => import('@/components/three/ServoStage'), {
+    33→  ssr: false,
+    34→  loading: () => (
+    35→    <div className="flex h-full items-center justify-center text-xs text-muted-foreground">Loading 3D…</div>
+    36→  ),
+    37→})
+    38→
+    39→type CategoryFilter = 'All' | ComponentCategory
+    40→
+    41→const STUDIO_BG =
+    42→  'radial-gradient(ellipse at 50% 32%, #ffffff 0%, #f0f2f6 55%, #e2e5ea 100%)'
+    43→
+    44→const PACK_ICONS: Record<string, typeof Bot> = {
+    45→  bot: Bot,
+    46→  radar: Radar,
+    47→  crosshair: RotateCw,
+    48→  battery: BatteryCharging,
+    49→}
+    50→
+    51→const FEATURED_PACK_ID = 'beginner-robot-pack'
+    52→
+    53→export function LibraryGrid({ onOpenServo, onOpenLab }: { onOpenServo: () => void; onOpenLab: () => void }) {
+    54→  const [query, setQuery] = useState('')
+    55→  const [category, setCategory] = useState<CategoryFilter>('All')
+    56→  const [packs, setPacks] = useState<PackState[] | null>(null)
+    57→  const [installingPackId, setInstallingPackId] = useState<string | null>(null)
+    58→  const [progress, setProgress] = useState(0)
+    59→  const { toast } = useToast()
+    60→
+    61→  /* ---- pack catalog from the server (install state lives in the DB) ---- */
+    62→  useEffect(() => {
+    63→    let cancelled = false
+    64→    fetch('/api/packs')
+    65→      .then((r) => {
+    66→        if (!r.ok) throw new Error('catalog request failed')
+    67→        return r.json()
+    68→      })
+    69→      .then((d: { packs: PackState[] }) => {
+    70→        if (!cancelled) setPacks(d.packs)
+    71→      })
+    72→      .catch(() => {
+    73→        if (!cancelled) setPacks(null)
+    74→      })
+    75→    return () => {
+    76→      cancelled = true
+    77→    }
+    78→  }, [])
+    79→
+    80→  const installPackFlow = useCallback(
+    81→    async (packId: string) => {
+    82→      if (installingPackId || !packs) return
+    83→      const pack = packs.find((p) => p.id === packId)
+    84→      if (!pack) return
+    85→      setInstallingPackId(packId)
+    86→      setProgress(0)
+    87→      const start = performance.now()
+    88→      const tick = (t: number) => {
+    89→        const pct = Math.min(92, ((t - start) / 1400) * 100)
+    90→        setProgress(pct)
+    91→        if (pct < 92) requestAnimationFrame(tick)
+    92→      }
+    93→      requestAnimationFrame(tick)
+    94→      try {
+    95→        const res = await fetch('/api/packs', {
+    96→          method: 'POST',
+    97→          headers: { 'Content-Type': 'application/json' },
+    98→          body: JSON.stringify({ packId, action: 'install' }),
+    99→        })
+   100→        if (!res.ok) throw new Error('install failed')
+   101→        const d: { packs: PackState[] } = await res.json()
+   102→        const remaining = 1400 - (performance.now() - start)
+   103→        if (remaining > 0) await new Promise((r) => setTimeout(r, remaining))
+   104→        setProgress(100)
+   105→        setPacks(d.packs)
+   106→        toast({
+   107→          title: `${pack.name} added to your library`,
+   108→          description: `${pack.componentIds.length} components unlocked — spec sheets, physics data and 3D models.`,
+   109→        })
+   110→      } catch {
+   111→        toast({
+   112→          title: 'Could not add the pack',
+   113→          description: 'The library service is unavailable — try again in a moment.',
+   114→        })
+   115→      } finally {
+   116→        setTimeout(() => {
+   117→          setInstallingPackId(null)
+   118→          setProgress(0)
+   119→        }, 450)
+   120→      }
+   121→    },
+   122→    [installingPackId, packs, toast]
+   123→  )
+   124→
+   125→  const uninstallPackFlow = useCallback(
+   126→    async (packId: string) => {
+   127→      if (!packs || packId === FEATURED_PACK_ID) return
+   128→      const pack = packs.find((p) => p.id === packId)
+   129→      if (!pack) return
+   130→      try {
+   131→        const res = await fetch('/api/packs', {
+   132→          method: 'POST',
+   133→          headers: { 'Content-Type': 'application/json' },
+   134→          body: JSON.stringify({ packId, action: 'uninstall' }),
+   135→        })
+   136→        if (!res.ok) throw new Error('uninstall failed')
+   137→        const d: { packs: PackState[] } = await res.json()
+   138→        setPacks(d.packs)
+   139→        toast({
+   140→          title: `${pack.name} removed`,
+   141→          description: 'Its components are locked again — reinstall any time, free during beta.',
+   142→        })
+   143→      } catch {
+   144→        toast({ title: 'Could not remove the pack', description: 'The library service is unavailable.' })
+   145→      }
+   146→    },
+   147→    [packs, toast]
+   148→  )
+   149→
+   150→  const exportAiCatalog = useCallback(async () => {
+   151→    try {
+   152→      const res = await fetch('/api/catalog')
+   153→      if (!res.ok) throw new Error('catalog failed')
+   154→      const data = await res.json()
+   155→      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+   156→      const url = URL.createObjectURL(blob)
+   157→      const a = document.createElement('a')
+   158→      a.href = url
+   159→      a.download = 'robotics-ai-catalog.json'
+   160→      document.body.appendChild(a)
+   161→      a.click()
+   162→      a.remove()
+   163→      URL.revokeObjectURL(url)
+   164→      toast({
+   165→        title: 'AI catalog exported',
+   166→        description: `${data.componentCount} components as machine-readable JSON — the exact artifact the AI generation layer will read.`,
+   167→      })
+   168→    } catch {
+   169→      toast({ title: 'Export failed', description: 'Could not reach the catalog API.' })
+   170→    }
+   171→  }, [toast])
+   172→
+   173→  /* ---- which components are unlocked by installed packs ---- */
+   174→  const unlockedIds = useMemo(() => {
+   175→    if (!packs) return null
+   176→    const s = new Set<string>()
+   177→    for (const p of packs) if (p.installed) p.componentIds.forEach((id) => s.add(id))
+   178→    return s
+   179→  }, [packs])
+   180→
+   181→  const packOf = useCallback(
+   182→    (componentId: string) => packs?.find((p) => p.componentIds.includes(componentId)),
+   183→    [packs]
+   184→  )
+   185→
+   186→  const isLocked = useCallback(
+   187→    (componentId: string) => unlockedIds !== null && !unlockedIds.has(componentId),
+   188→    [unlockedIds]
+   189→  )
+   190→
+   191→  const items = useMemo(() => {
+   192→    const q = query.trim().toLowerCase()
+   193→    return LIBRARY.filter((c) => {
+   194→      const matchesCategory = category === 'All' || c.category === category
+   195→      const matchesQuery =
+   196→        !q || c.name.toLowerCase().includes(q) || c.tagline.toLowerCase().includes(q)
+   197→      return matchesCategory && matchesQuery
+   198→    })
+   199→  }, [query, category])
+   200→
+   201→  const servo = items.find((c) => c.id === 'servo-motor')
+   202→  const upcoming = items.filter((c) => c.status === 'soon')
+   203→  const availableCount = LIBRARY.filter((c) => c.status === 'available').length
+   204→  const installedCount = packs?.filter((p) => p.installed).length ?? 0
+   205→
+   206→  return (
+   207→    <div className="mx-auto w-full max-w-7xl px-4 pb-16 pt-10 sm:px-6 lg:px-8">
+   208→      {/* Hero */}
+   209→      <div className="flex flex-col gap-3">
+   210→        <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">
+   211→          The component library<span className="text-amber-500">.</span>
+   212→        </h1>
+   213→        <p className="max-w-2xl text-muted-foreground">
+   214→          Real robotics parts as living 3D models — but a model alone is not a component.
+   215→          Every entry here carries its datasheet specs, physics properties, real-world cost
+   216→          and a machine-readable AI profile, so the same library that a student browses is
+   217→          the one a future AI designer reads when you say &ldquo;build me a robot.&rdquo;
+   218→        </p>
+   219→        <div className="mt-1 flex flex-wrap items-center gap-2">
+   220→          <Badge className="gap-1 border-amber-200 bg-amber-50 font-medium text-amber-700 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">
+   221→            <Sparkles className="h-3 w-3" />
+   222→            {availableCount} live model · {LIBRARY.length} components
+   223→          </Badge>
+   224→          <Badge variant="secondary" className="gap-1 font-medium">
+   225→            <Link2 className="h-3 w-3" />
+   226→            Connection contract · ports + DOF
+   227→          </Badge>
+   228→          <Badge variant="secondary" className="gap-1 font-medium">
+   229→            <Weight className="h-3 w-3" />
+   230→            Physics + cost data on every part
+   231→          </Badge>
+   232→          <button
+   233→            onClick={exportAiCatalog}
+   234→            className="inline-flex items-center gap-1.5 rounded-full border border-dashed px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:border-amber-400 hover:text-amber-600 dark:hover:text-amber-400"
+   235→            aria-label="Export the machine-readable AI catalog as JSON"
+   236→          >
+   237→            <Download className="h-3 w-3" />
+   238→            Export AI catalog (JSON)
+   239→          </button>
+   240→        </div>
+   241→      </div>
+   242→
+   243→      {/* Pack shelf */}
+   244→      <section className="mt-10" aria-labelledby="packs-heading">
+   245→        <div className="flex flex-wrap items-end justify-between gap-2">
+   246→          <div>
+   247→            <h2 id="packs-heading" className="flex items-center gap-2 text-xl font-semibold tracking-tight">
+   248→              <Package className="h-5 w-5 text-amber-500" />
+   249→              Component packs
+   250→            </h2>
+   251→            <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+   252→              Download only what you need — curated bundles like game skin packs. Installing
+   253→              unlocks the components&apos; spec sheets, physics data and 3D models in your
+   254→              library.
+   255→            </p>
+   256→          </div>
+   257→          <Badge variant="outline" className="font-medium text-muted-foreground">
+   258→            {packs ? `${installedCount}/${packs.length} installed` : 'Loading…'}
+   259→          </Badge>
+   260→        </div>
+   261→
+   262→        <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+   263→          {(packs ?? []).map((p) => {
+   264→            const PackIcon = PACK_ICONS[p.icon] ?? Package
+   265→            const installing = installingPackId === p.id
+   266→            const levelColor =
+   267→              p.level === 'Beginner'
+   268→                ? 'text-emerald-600 dark:text-emerald-400'
+   269→                : 'text-amber-600 dark:text-amber-400'
+   270→            return (
+   271→              <Card
+   272→                key={p.id}
+   273→                className={`flex h-full flex-col transition-all duration-300 ${
+   274→                  p.featured
+   275→                    ? 'border-amber-300 shadow-sm dark:border-amber-800'
+   276→                    : 'hover:border-foreground/25'
+   277→                }`}
+   278→              >
+   279→                <CardContent className="flex h-full flex-col gap-3 p-5">
+   280→                  <div className="flex items-start justify-between gap-2">
+   281→                    <div
+   282→                      className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg ${
+   283→                        p.installed
+   284→                          ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+   285→                          : 'bg-amber-500/10 text-amber-600 dark:text-amber-400'
+   286→                      }`}
+   287→                    >
+   288→                      <PackIcon className="h-5 w-5" />
+   289→                    </div>
+   290→                    <div className="flex flex-col items-end gap-1">
+   291→                      <span className={`text-[11px] font-semibold ${levelColor}`}>{p.level}</span>
+   292→                      <span className="text-[11px] text-muted-foreground">
+   293→                        {p.sizeMb} MB · {p.priceLabel}
+   294→                      </span>
+   295→                    </div>
+   296→                  </div>
+   297→                  <div>
+   298→                    <h3 className="font-semibold leading-tight">{p.name}</h3>
+   299→                    <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{p.tagline}</p>
+   300→                  </div>
+   301→                  <div className="flex flex-wrap gap-1.5">
+   302→                    {p.componentIds.map((cid) => {
+   303→                      const comp = getComponent(cid)
+   304→                      const modeled = comp?.status === 'available'
+   305→                      return (
+   306→                        <span
+   307→                          key={cid}
+   308→                          className="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+   309→                        >
+   310→                          <span
+   311→                            className={`h-1.5 w-1.5 rounded-full ${
+   312→                              modeled ? 'bg-emerald-500' : 'bg-zinc-300 dark:bg-zinc-600'
+   313→                            }`}
+   314→                          />
+   315→                          {comp?.name ?? cid}
+   316→                        </span>
+   317→                      )
+   318→                    })}
+   319→                  </div>
+   320→
+   321→                  <div className="mt-auto space-y-2 pt-1">
+   322→                    {installing ? (
+   323→                      <div className="space-y-1.5" aria-live="polite">
+   324→                        <Progress value={progress} className="h-1.5" />
+   325→                        <p className="text-[11px] font-medium text-muted-foreground">
+   326→                          Downloading… {Math.round(progress)}%
+   327→                        </p>
+   328→                      </div>
+   329→                    ) : p.installed ? (
+   330→                      <div className="flex items-center gap-2">
+   331→                        <Badge className="flex-1 justify-center gap-1 border-emerald-200 bg-emerald-50 font-medium text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300">
+   332→                          <Check className="h-3 w-3" />
+   333→                          Installed
+   334→                        </Badge>
+   335→                        {p.id !== FEATURED_PACK_ID && (
+   336→                          <Button
+   337→                            variant="ghost"
+   338→                            size="icon"
+   339→                            className="h-8 w-8 shrink-0 text-muted-foreground hover:text-red-500"
+   340→                            aria-label={`Remove ${p.name}`}
+   341→                            title={`Remove ${p.name}`}
+   342→                            onClick={() => uninstallPackFlow(p.id)}
+   343→                          >
+   344→                            <Trash2 className="h-3.5 w-3.5" />
+   345→                          </Button>
+   346→                        )}
+   347→                      </div>
+   348→                    ) : (
+   349→                      <Button
+   350→                        size="sm"
+   351→                        className="w-full gap-1.5 font-medium"
+   352→                        aria-label={`Add ${p.name} to your library`}
+   353→                        onClick={() => installPackFlow(p.id)}
+   354→                      >
+   355→                        <Download className="h-3.5 w-3.5" />
+   356→                        Add to library
+   357→                      </Button>
+   358→                    )}
+   359→                  </div>
+   360→                </CardContent>
+   361→              </Card>
+   362→            )
+   363→          })}
+   364→          {!packs && (
+   365→            <p className="col-span-full py-6 text-center text-sm text-muted-foreground">
+   366→              Loading pack catalog from the library service…
+   367→            </p>
+   368→          )}
+   369→        </div>
+   370→      </section>
+   371→
+   372→      {/* Search + category filter */}
+   373→      <div className="mt-10 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+   374→        <div className="relative w-full sm:max-w-xs">
+   375→          <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+   376→          <Input
+   377→            value={query}
+   378→            onChange={(e) => setQuery(e.target.value)}
+   379→            placeholder="Search components…"
+   380→            className="pl-8"
+   381→            aria-label="Search components"
+   382→          />
+   383→        </div>
+   384→        <div className="flex flex-wrap items-center gap-1.5" role="tablist" aria-label="Filter by category">
+   385→          {CATEGORIES.map((c) => (
+   386→            <button
+   387→              key={c}
+   388→              role="tab"
+   389→              aria-selected={category === c}
+   390→              onClick={() => setCategory(c)}
+   391→              className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+   392→                category === c
+   393→                  ? 'border-foreground/80 bg-foreground text-background'
+   394→                  : 'border-border text-muted-foreground hover:border-foreground/30 hover:text-foreground'
+   395→              }`}
+   396→            >
+   397→              {c}
+   398→            </button>
+   399→          ))}
+   400→        </div>
+   401→      </div>
+   402→
+   403→      {/* Grid */}
+   404→      {items.length === 0 ? (
+   405→        <div className="mt-16 flex flex-col items-center gap-2 text-center text-muted-foreground">
+   406→          <Search className="h-8 w-8 opacity-40" />
+   407→          <p className="text-sm">No components match your filters.</p>
+   408→          <button
+   409→            className="text-xs font-medium text-amber-600 underline-offset-4 hover:underline dark:text-amber-400"
+   410→            onClick={() => {
+   411→              setQuery('')
+   412→              setCategory('All')
+   413→            }}
+   414→          >
+   415→            Clear filters
+   416→          </button>
+   417→        </div>
+   418→      ) : (
+   419→        <div className="mt-6 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+   420→          {/* Featured: the servo motor with a live 3D preview */}
+   421→          {servo && !isLocked('servo-motor') && (
+   422→            <Card
+   423→              role="button"
+   424→              tabIndex={0}
+   425→              aria-label="Open the Servo Motor 3D model"
+   426→              onClick={onOpenServo}
+   427→              onKeyDown={(e) => {
+   428→                if (e.key === 'Enter' || e.key === ' ') onOpenServo()
+   429→              }}
+   430→              className="group cursor-pointer overflow-hidden transition-all duration-300 hover:border-amber-300 hover:shadow-lg hover:shadow-amber-100 dark:hover:border-amber-800 dark:hover:shadow-none sm:col-span-2"
+   431→            >
+   432→              <CardContent className="flex flex-col gap-0 p-0 md:flex-row">
+   433→                <div
+   434→                  className="relative h-60 min-w-0 flex-1 overflow-hidden md:h-auto"
+   435→                  style={{ background: STUDIO_BG }}
+   436→                >
+   437→                  <ServoStage
+   438→                    variant="mini"
+   439→                    showCable={false}
+   440→                    autoSweep={{ min: 15, max: 165, speed: 75 }}
+   441→                  />
+   442→                  <span className="pointer-events-none absolute left-3 top-3 inline-flex items-center gap-1 rounded-full border border-amber-200 bg-white/90 px-2.5 py-1 text-[11px] font-semibold text-amber-700 shadow-sm backdrop-blur dark:border-amber-800 dark:bg-zinc-900/90 dark:text-amber-400">
+   443→                    <span className="relative flex h-1.5 w-1.5">
+   444→                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
+   445→                      <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-amber-500" />
+   446→                    </span>
+   447→                    Live · WebGL preview
+   448→                  </span>
+   449→                  <span className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full bg-black/5 px-2.5 py-1 text-[10px] font-medium text-zinc-500">
+   450→                    Horn is sweeping — open to take control
+   451→                  </span>
+   452→                </div>
+   453→
+   454→                <div className="flex w-full flex-col gap-3 border-t p-5 md:w-[270px] md:shrink-0 md:border-l md:border-t-0">
+   455→                  <div className="flex items-center justify-between gap-2">
+   456→                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400">
+   457→                      <RotateCw className="h-5 w-5" />
+   458→                    </div>
+   459→                    <Badge variant="secondary" className="font-medium">
+   460→                      {servo.category}
+   461→                    </Badge>
+   462→                  </div>
+   463→                  <div>
+   464→                    <h2 className="text-lg font-semibold leading-tight">{servo.name}</h2>
+   465→                    <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{servo.tagline}</p>
+   466→                  </div>
+   467→                  <div className="flex flex-wrap gap-1.5 text-[11px] text-muted-foreground">
+   468→                    <span className="rounded border px-1.5 py-0.5">180° travel</span>
+   469→                    <span className="rounded border px-1.5 py-0.5">PWM 50 Hz</span>
+   470→                    <span className="rounded border px-1.5 py-0.5">7 ports · 1 DOF</span>
+   471→                    <span className="rounded border px-1.5 py-0.5">{servo.mass} g</span>
+   472→                    <span className="rounded border px-1.5 py-0.5">from ${servo.priceUsd}</span>
+   473→                  </div>
+   474→                  <Button className="mt-auto w-full gap-1.5 font-medium" aria-label="Open the servo motor 3D model">
+   475→                    Open 3D model
+   476→                    <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
+   477→                  </Button>
+   478→                </div>
+   479→              </CardContent>
+   480→            </Card>
+   481→          )}
+   482→
+   483→          {/* Locked servo placeholder (pack removed) */}
+   484→          {servo && isLocked('servo-motor') && (
+   485→            <LockedCard
+   486→              component={servo}
+   487→              pack={packOf('servo-motor')}
+   488→              onGetPack={installPackFlow}
+   489→            />
+   490→          )}
+   491→
+   492→          {/* Upcoming components */}
+   493→          {upcoming.map((c) =>
+   494→            isLocked(c.id) ? (
+   495→              <LockedCard key={c.id} component={c} pack={packOf(c.id)} onGetPack={installPackFlow} />
+   496→            ) : (
+   497→              <Card
+   498→                key={c.id}
+   499→                role="button"
+   500→                tabIndex={0}
+   501→                aria-label={`${c.name} — spec sheet available, 3D model coming soon`}
+   502→                onClick={() =>
+   503→                  toast({
+   504→                    title: `${c.name} is modeled next`,
+   505→                    description: `Spec sheet unlocked: ${c.mass} g, from $${c.priceUsd}. The procedural 3D model is in the modeling queue.`,
+   506→                  })
+   507→                }
+   508→                onKeyDown={(e) => {
+   509→                  if (e.key === 'Enter' || e.key === ' ')
+   510→                    toast({
+   511→                      title: `${c.name} is modeled next`,
+   512→                      description: `Spec sheet unlocked: ${c.mass} g, from $${c.priceUsd}. The procedural 3D model is in the modeling queue.`,
+   513→                    })
+   514→                }}
+   515→                className="cursor-pointer transition-all duration-300 hover:border-foreground/25"
+   516→              >
+   517→                <CardContent className="flex h-full flex-col gap-3 p-5">
+   518→                  <div className="flex items-start justify-between">
+   519→                    <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+   520→                      <c.icon className="h-5 w-5" />
+   521→                    </div>
+   522→                    <Badge variant="outline" className="gap-1 font-medium text-muted-foreground">
+   523→                      <Clock3 className="h-3 w-3" />
+   524→                      3D queued
+   525→                    </Badge>
+   526→                  </div>
+   527→                  <div>
+   528→                    <h2 className="font-semibold leading-tight">{c.name}</h2>
+   529→                    <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{c.tagline}</p>
+   530→                  </div>
+   531→                  <div className="mt-auto flex items-center justify-between text-xs text-muted-foreground">
+   532→                    <span>{c.category}</span>
+   533→                    <span className="flex items-center gap-2 opacity-80">
+   534→                      <span className="inline-flex items-center gap-1">
+   535→                        <Weight className="h-3 w-3" />
+   536→                        {c.mass} g
+   537→                      </span>
+   538→                      <span>from ${c.priceUsd}</span>
+   539→                    </span>
+   540→                  </div>
+   541→                </CardContent>
+   542→              </Card>
+   543→            )
+   544→          )}
+   545→        </div>
+   546→      )}
+   547→
+   548→      {/* Assembly Lab — the connect-components proof of concept */}
+   549→      <div className="mt-10">
+   550→        <Card
+   551→          role="button"
+   552→          tabIndex={0}
+   553→          aria-label="Open the Assembly Lab"
+   554→          onClick={onOpenLab}
+   555→          onKeyDown={(e) => {
+   556→            if (e.key === 'Enter' || e.key === ' ') onOpenLab()
+   557→          }}
+   558→          className="group cursor-pointer overflow-hidden border-zinc-200 bg-zinc-900 text-zinc-50 transition-all duration-300 hover:border-amber-400/60 hover:shadow-xl hover:shadow-amber-500/10 dark:border-zinc-800"
+   559→        >
+   560→          <CardContent className="flex flex-col gap-4 p-6 sm:flex-row sm:items-center sm:gap-6 sm:p-7">
+   561→            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-amber-500/15 text-amber-400">
+   562→              <Bot className="h-6 w-6" />
+   563→            </div>
+   564→            <div className="min-w-0 flex-1">
+   565→              <div className="flex flex-wrap items-center gap-2">
+   566→                <h2 className="text-lg font-semibold tracking-tight">Assembly Lab</h2>
+   567→                <Badge className="gap-1 border-amber-400/30 bg-amber-500/15 font-medium text-amber-300">
+   568→                  <span className="relative flex h-1.5 w-1.5">
+   569→                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
+   570→                    <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-amber-400" />
+   571→                  </span>
+   572→                  Live mechanism
+   573→                </Badge>
+   574→              </div>
+   575→              <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-zinc-400">
+   576→                See components working together: the servo bolts to a chassis deck through its
+   577→                mount ports and drives a crank-rocker linkage through its output shaft. Command
+   578→                it, drag the crank, watch the motion transmit — this is how robots get built here.
+   579→              </p>
+   580→            </div>
+   581→            <Button className="w-full shrink-0 gap-1.5 font-medium sm:w-auto" aria-label="Open the Assembly Lab">
+   582→              Open Assembly Lab
+   583→              <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
+   584→            </Button>
+   585→          </CardContent>
+   586→        </Card>
+   587→      </div>
+   588→    </div>
+   589→  )
+   590→}
+   591→
+   592→/* ------------------------------------------------------------------ */
+   593→/* Locked component card                                               */
+   594→/* ------------------------------------------------------------------ */
+   595→
+   596→function LockedCard({
+   597→  component,
+   598→  pack,
+   599→  onGetPack,
+   600→}: {
+   601→  component: { id: string; name: string; tagline: string; category: string; mass: number; priceUsd: number; icon: typeof Bot }
+   602→  pack?: PackState
+   603→  onGetPack: (packId: string) => void
+   604→}) {
+   605→  return (
+   606→    <Card className="relative overflow-hidden opacity-90">
+   607→      <CardContent className="flex h-full flex-col gap-3 p-5">
+   608→        <div className="flex items-start justify-between">
+   609→          <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+   610→            <component.icon className="h-5 w-5 opacity-60" />
+   611→          </div>
+   612→          <Badge variant="outline" className="gap-1 font-medium text-muted-foreground">
+   613→            <Lock className="h-3 w-3" />
+   614→            Pack required
+   615→          </Badge>
+   616→        </div>
+   617→        <div>
+   618→          <h2 className="font-semibold leading-tight text-muted-foreground">{component.name}</h2>
+   619→          <p className="mt-1 text-sm leading-relaxed text-muted-foreground/80">{component.tagline}</p>
+   620→        </div>
+   621→        <div className="mt-auto space-y-2.5 pt-2">
+   622→          <p className="text-xs text-muted-foreground">
+   623→            Included in the{' '}
+   624→            <span className="font-medium text-foreground">{pack?.name ?? 'component pack'}</span>
+   625→            <span className="ml-2 inline-flex items-center gap-1 opacity-75">
+   626→              <Weight className="h-3 w-3" />
+   627→              {component.mass} g · from ${component.priceUsd}
+   628→            </span>
+   629→          </p>
+   630→          {pack && (
+   631→            <Button
+   632→              size="sm"
+   633→              variant="outline"
+   634→              className="w-full gap-1.5 font-medium"
+   635→              onClick={() => onGetPack(pack.id)}
+   636→              aria-label={`Add ${pack.name} to unlock ${component.name}`}
+   637→            >
+   638→              <Download className="h-3.5 w-3.5" />
+   639→              Get {pack.name}
+   640→            </Button>
+   641→          )}
+   642→        </div>
+   643→      </CardContent>
+   644→    </Card>
+   645→  )
+   646→}
+   647→

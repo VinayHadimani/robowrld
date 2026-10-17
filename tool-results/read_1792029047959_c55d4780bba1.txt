@@ -1,0 +1,646 @@
+     1→     1→/**
+     2→     2→ * The component schema — the platform's single source of truth.
+     3→     3→ *
+     4→     4→ * This file is what turns "a nice 3D viewer" into Pillar 1 of the robotics
+     5→     5→ * creation platform. Every library component is described as DATA:
+     6→     6→ *
+     7→     7→ *   identity    → what it is, who makes it, what it costs (real-world commerce)
+     8→     8→ *   specs       → the headline engineering numbers from the datasheet
+     9→     9→ *   physics     → mass, materials, electrical load — what a simulation engine
+    10→    10→ *                 (Godot later) needs to make the virtual behave like the real
+    11→    11→ *   ai          → a machine-readable profile the AI generation layer (Pillar 2)
+    12→    12→ *                 reads when a user says "build me a robot that avoids walls"
+    13→    13→ *   model       → where the 3D geometry comes from (procedural today, glTF
+    14→    14→ *                 from OpenSCAD/STL exports later — the schema accepts both)
+    15→    15→ *
+    16→    16→ * The geometry itself stays procedural in TypeScript (see ServoMotor.tsx):
+    17→    17→ * procedural models can be parameterized, are tiny to download, and render
+    18→    18→ * interactively. The DB stores the catalog + ownership; this file is the
+    19→    19→ * definition. Everything here is JSON-serializable on purpose so it can be
+    20→    20→ * served straight to browsers, the AI layer, and the future build-instruction
+    21→    21→ * exporter without transformation.
+    22→    22→ */
+    23→    23→
+    24→    24→import type { ComponentModel } from './connections'
+    25→    25→import { SERVO_MODEL } from './connections'
+    26→    26→
+    27→    27→/* ------------------------------------------------------------------ */
+    28→    28→/* Types                                                               */
+    29→    29→/* ------------------------------------------------------------------ */
+    30→    30→
+    31→    31→export type ComponentStatus = 'available' | 'soon'
+    32→    32→export type ComponentCategory = 'Actuators' | 'Sensors' | 'Power' | 'Controller'
+    33→    33→
+    34→    34→export interface SpecRow {
+    35→    35→  label: string
+    36→    36→  value: string
+    37→    37→}
+    38→    38→
+    39→    39→export interface PhysicsProperties {
+    40→    40→  /** Mass in grams — the number a physics engine steps with. */
+    41→    41→  mass: number
+    42→    42→  /** Footprint in mm: length × width × height. */
+    43→    43→  dimensions: { l: number; w: number; h: number }
+    44→    44→  /** What each part is made of — feeds material physics + cost realism. */
+    45→    45→  materials: Array<{ part: string; material: string }>
+    46→    46→  /** Electrical load profile. */
+    47→    47→  electrical: Array<{ label: string; value: string }>
+    48→    48→  /** Mechanical ratings relevant to simulation. */
+    49→    49→  mechanical: Array<{ label: string; value: string }>
+    50→    50→  /** One-paragraph note on how the sim engine should treat this part. */
+    51→    51→  simNotes: string
+    52→    52→}
+    53→    53→
+    54→    54→export interface CommerceInfo {
+    55→    55→  manufacturer: string
+    56→    56→  partNumber: string
+    57→    57→  /** Typical street price range in USD. */
+    58→    58→  priceUsd: [number, number]
+    59→    59→  /** INR equivalent — the first market this platform targets. */
+    60→    60→  priceInr: [number, number]
+    61→    61→  availability: string
+    62→    62→  /** Where a student can actually buy it. */
+    63→    63→  vendors: string[]
+    64→    64→}
+    65→    65→
+    66→    66→export interface AiProfile {
+    67→    67→  /** One line the AI layer reads first. */
+    68→    68→  summary: string
+    69→    69→  /** What this component can do in an assembly. */
+    70→    70→  capabilities: string[]
+    71→    71→  /** Hard limits the AI must respect when designing. */
+    72→    72→  constraints: string[]
+    73→    73→  /** Situations where this is the right pick. */
+    74→    74→  bestFor: string[]
+    75→    75→}
+    76→    76→
+    77→    77→export type ModelSource =
+    78→    78→  | {
+    79→    79→      /** Code-generated parametric geometry (an R3F component export). */
+    80→    80→      kind: 'procedural'
+    81→    81→      /** Name of the exported React Three Fiber component. */
+    82→    82→      component: string
+    83→    83→      /** True if the mesh matches the spec-sheet dimensions exactly. */
+    84→    84→      dimensionAccurate: boolean
+    85→    85→      note: string
+    86→    86→    }
+    87→    87→  | {
+    88→    88→      /** External asset (future: OpenSCAD → STL → glTF pipeline). */
+    89→    89→      kind: 'gltf'
+    90→    90→      url: string
+    91→    91→    }
+    92→    92→
+    93→    93→export interface RoboticsComponent {
+    94→    94→  id: string
+    95→    95→  name: string
+    96→    96→  category: ComponentCategory
+    97→    97→  status: ComponentStatus
+    98→    98→  tagline: string
+    99→    99→  /** Long-form description for the component detail page. */
+   100→   100→  description: string
+   101→   101→  specs: SpecRow[]
+   102→   102→  physics: PhysicsProperties
+   103→   103→  commerce: CommerceInfo
+   104→   104→  ai: AiProfile
+   105→   105→  model: ModelSource
+   106→   106→  /** Connection contract (ports + DOF) — defined in connections.ts. */
+   107→   107→  connectionModel?: ComponentModel
+   108→   108→}
+   109→   109→
+   110→   110→/* ------------------------------------------------------------------ */
+   111→   111→/* Components                                                          */
+   112→   112→/* ------------------------------------------------------------------ */
+   113→   113→
+   114→   114→/**
+   115→   115→ * The servo. Modeled after the Tower Pro MG996R class of metal-gear
+   116→   116→ * hobby servos — the workhorse of student robotics. This is the first
+   117→   117→ * fully-modeled component of the platform: procedural 3D, connection
+   118→   118→ * contract, live PWM control, physics data and AI profile.
+   119→   119→ */
+   120→   120→export const SERVO: RoboticsComponent = {
+   121→   121→  id: 'servo-motor',
+   122→   122→  name: 'Servo Motor',
+   123→   123→  category: 'Actuators',
+   124→   124→  status: 'available',
+   125→   125→  tagline: 'Closed-loop positional actuator with PWM control and a metal gear train.',
+   126→   126→  description:
+   127→   127→    'A servo motor is a rotary actuator that rotates to a commanded position and actively holds it there using closed-loop feedback from an internal potentiometer. It is driven by a PWM signal — at 50 Hz, a 0.5 ms pulse commands 0° and a 2.5 ms pulse commands 180°. This replica is modeled procedurally after a metal-gear hobby servo: drag the horn with your pointer, sweep it back and forth, swap horns and colors, and watch the control signal respond in real time.',
+   128→   128→  specs: [
+   129→   129→    { label: 'Operating voltage', value: '4.8 – 7.2 V DC' },
+   130→   130→    { label: 'Stall torque', value: '9.4 kg·cm @ 4.8 V · 11 kg·cm @ 6 V' },
+   131→   131→    { label: 'Travel speed', value: '0.17 s / 60° @ 4.8 V' },
+   132→   132→    { label: 'Rotation range', value: '~180° (commandable 0 – 180°)' },
+   133→   133→    { label: 'Control signal', value: 'PWM @ 50 Hz · 0.5 – 2.5 ms pulse' },
+   134→   134→    { label: 'Gear train', value: 'All-metal, dual ball bearing output' },
+   135→   135→    { label: 'Dimensions', value: '40.7 × 19.7 × 42.9 mm' },
+   136→   136→    { label: 'Weight', value: '55 g (typical)' },
+   137→   137→    { label: 'Cable', value: '300 mm, 3-pin (S · +V · GND)' },
+   138→   138→  ],
+   139→   139→  physics: {
+   140→   140→    mass: 55,
+   141→   141→    dimensions: { l: 40.7, w: 19.7, h: 42.9 },
+   142→   142→    materials: [
+   143→   143→      { part: 'Center case', material: 'Anodized aluminium' },
+   144→   144→      { part: 'Top & end caps', material: 'Glass-filled PBT' },
+   145→   145→      { part: 'Gear train', material: 'Hardened steel + brass' },
+   146→   146→      { part: 'Output shaft', material: 'Steel, dual ball bearing' },
+   147→   147→      { part: 'Horn', material: 'Glass-filled nylon' },
+   148→   148→      { part: 'Cable', material: 'PVC, 26 AWG' },
+   149→   149→    ],
+   150→   150→    electrical: [
+   151→   151→      { label: 'Idle current', value: '~10 mA' },
+   152→   152→      { label: 'Typical moving load', value: '400 – 900 mA' },
+   153→   153→      { label: 'Stall current', value: '~2.5 A @ 6 V' },
+   154→   154→      { label: 'Supply range', value: '4.8 – 7.2 V' },
+   155→   155→    ],
+   156→   156→    mechanical: [
+   157→   157→      { label: 'Stall torque', value: '9.4 kg·cm @ 4.8 V (0.92 N·m)' },
+   158→   158→      { label: 'No-load speed', value: '~350°/s @ 4.8 V' },
+   159→   159→      { label: 'Backlash', value: '< 1° (metal gears)' },
+   160→   160→      { label: 'Axial load', value: '≤ 5 N on output shaft' },
+   161→   161→    ],
+   162→   162→    simNotes:
+   163→   163→      'Treat as a positional rotary joint with a torque limit and a speed limit: command an angle, ramp toward it at ~350°/s max, and saturate torque at 0.92 N·m. Drawing more than ~2.5 A should brown-out an undersized supply — a lesson students should meet in simulation before they meet it in smoke.',
+   164→   164→  },
+   165→   165→  commerce: {
+   166→   166→    manufacturer: 'Tower Pro',
+   167→   167→    partNumber: 'MG996R',
+   168→   168→    priceUsd: [7, 12],
+   169→   169→    priceInr: [550, 950],
+   170→   170→    availability: 'In stock everywhere — the most common hobby servo on earth',
+   171→   171→    vendors: ['Amazon', 'Robu.in', 'SparkFun', 'Local robotics stores'],
+   172→   172→  },
+   173→   173→  ai: {
+   174→   174→    summary: 'Precise rotary position actuator: turns to a commanded 0–180° angle and holds it under load.',
+   175→   175→    capabilities: [
+   176→   176→      'Positional rotation to any angle in 0–180°',
+   177→   177→      'Actively holds position against external torque',
+   178→   178→      '~0.17 s per 60° of travel under no load',
+   179→   179→      'Closed-loop: no encoder needed by the controller',
+   180→   180→    ],
+   181→   181→    constraints: [
+   182→   182→      'Not continuous rotation — cannot spin a wheel (stock)',
+   183→   183→      'Adds 55 g per joint — arms compound quickly',
+   184→   184→      'Stall current ~2.5 A can brown-out small battery packs',
+   185→   185→      'Needs one PWM-capable pin per servo',
+   186→   186→    ],
+   187→   187→    bestFor: [
+   188→   188→      'Robotic arm joints and grippers',
+   189→   189→      'Walking / balancing robot hips and knees',
+   190→   190→      'Steering on a rover (paired with a DC drive motor)',
+   191→   191→      'Any mechanism that must HOLD a position, not just reach it',
+   192→   192→    ],
+   193→   193→  },
+   194→   194→  model: {
+   195→   195→    kind: 'procedural',
+   196→   196→    component: 'ServoMotor',
+   197→   197→    dimensionAccurate: true,
+   198→   198→    note: 'Fully parametric TypeScript geometry — tabs, spline, horns and cable are all code. Spec-sheet dimensions are ground truth for simulation.',
+   199→   199→  },
+   200→   200→  connectionModel: SERVO_MODEL,
+   201→   201→}
+   202→   202→
+   203→   203→/** 37 mm brushed DC gear motor — the traction actuator. */
+   204→   204→export const DC_MOTOR: RoboticsComponent = {
+   205→   205→  id: 'dc-motor',
+   206→   206→  name: 'DC Gear Motor',
+   207→   207→  category: 'Actuators',
+   208→   208→  status: 'soon',
+   209→   209→  tagline: 'Continuous-rotation brushed DC motor with planetary gearbox.',
+   210→   210→  description:
+   211→   211→    'A brushed DC gear motor spins continuously in either direction — the classic traction actuator for wheels, tracks and props. The built-in gearbox trades raw speed for torque; direction and speed are set by an H-bridge (see the Speed Controller).',
+   212→   212→  specs: [
+   213→   213→    { label: 'Operating voltage', value: '6 – 12 V DC' },
+   214→   214→    { label: 'Gearbox', value: 'Planetary, 19:1 steel' },
+   215→   215→    { label: 'Output speed', value: '200 RPM @ 12 V (no load)' },
+   216→   216→    { label: 'Stall torque', value: '15 kg·cm @ 12 V' },
+   217→   217→    { label: 'Dimensions', value: '37 mm Ø × 56 mm' },
+   218→   218→    { label: 'Weight', value: '210 g' },
+   219→   219→  ],
+   220→   220→  physics: {
+   221→   221→    mass: 210,
+   222→   222→    dimensions: { l: 56, w: 37, h: 37 },
+   223→   223→    materials: [
+   224→   224→      { part: 'Gearbox housing', material: 'Anodized aluminium' },
+   225→   225→      { part: 'Gears', material: 'Steel, planetary' },
+   226→   226→      { part: 'Motor can', material: 'Steel, nickel-plated' },
+   227→   227→    ],
+   228→   228→    electrical: [
+   229→   229→      { label: 'No-load current', value: '~0.3 A' },
+   230→   230→      { label: 'Typical load', value: '1.5 – 3 A' },
+   231→   231→      { label: 'Stall current', value: '~7 A @ 12 V' },
+   232→   232→    ],
+   233→   233→    mechanical: [
+   234→   234→      { label: 'Stall torque', value: '15 kg·cm @ 12 V (1.47 N·m)' },
+   235→   235→      { label: 'No-load speed', value: '200 RPM @ 12 V' },
+   236→   236→    ],
+   237→   237→    simNotes:
+   238→   238→      'Model as a torque-speed line: max torque at stall, max speed at no-load, linear in between. Direction flips with voltage polarity — always paired with an H-bridge ESC.',
+   239→   239→  },
+   240→   240→  commerce: {
+   241→   241→    manufacturer: 'Yonge / generic',
+   242→   242→    partNumber: '37D-19:1',
+   243→   243→    priceUsd: [9, 16],
+   244→   244→    priceInr: [700, 1200],
+   245→   245→    availability: 'Widely stocked; buy with matching mounting brackets',
+   246→   246→    vendors: ['Amazon', 'Robu.in', 'Pololu'],
+   247→   247→  },
+   248→   248→  ai: {
+   249→   249→    summary: 'Continuous-rotation traction motor: speed and direction set by an ESC, no position feedback.',
+   250→   250→    capabilities: [
+   251→   251→      'Continuous rotation in both directions',
+   252→   252→      'Speed control via PWM through an H-bridge',
+   253→   253→      'High torque from the 19:1 planetary gearbox',
+   254→   254→    ],
+   255→   255→    constraints: [
+   256→   256→      'No position feedback — needs encoders for odometry',
+   257→   257→      'Must be driven by a speed controller, never straight from a microcontroller pin',
+   258→   258→      'Stall current ~7 A — size the ESC and battery for it',
+   259→   259→    ],
+   260→   260→    bestFor: ['Drive wheels on rovers', 'Tank-style locomotion', 'Conveyor / feeder mechanisms'],
+   261→   261→  },
+   262→   262→  model: {
+   263→   263→    kind: 'procedural',
+   264→   264→    component: 'DcGearMotor',
+   265→   265→    dimensionAccurate: true,
+   266→   266→    note: 'Queued for procedural modeling — the geometry builder follows the same pipeline as the servo.',
+   267→   267→  },
+   268→   268→}
+   269→   269→
+   270→   270→/** NEMA 17 bipolar stepper. */
+   271→   271→export const STEPPER_MOTOR: RoboticsComponent = {
+   272→   272→  id: 'stepper-motor',
+   273→   273→  name: 'Stepper Motor',
+   274→   274→  category: 'Actuators',
+   275→   275→  status: 'soon',
+   276→   276→  tagline: 'NEMA 17 bipolar stepper for precise open-loop positioning.',
+   277→   277→  description:
+   278→   278→    'A stepper motor moves in exact increments — steps — instead of to a commanded angle. Driven by a chopper driver (A4988/DRV8825 class), it gives CNC-grade positioning without any feedback sensor, at the cost of weight and heat.',
+   279→   279→  specs: [
+   280→   280→    { label: 'Frame', value: 'NEMA 17 · 42.3 × 42.3 mm' },
+   281→   281→    { label: 'Step angle', value: '1.8° (200 steps/rev)' },
+   282→   282→    { label: 'Rated current', value: '1.68 A per phase' },
+   283→   283→    { label: 'Holding torque', value: '0.59 N·m (6.0 kg·cm)' },
+   284→   284→    { label: 'Body length', value: '47 mm' },
+   285→   285→    { label: 'Weight', value: '350 g' },
+   286→   286→  ],
+   287→   287→  physics: {
+   288→   288→    mass: 350,
+   289→   289→    dimensions: { l: 42.3, w: 42.3, h: 47 },
+   290→   290→    materials: [
+   291→   291→      { part: 'Laminations & shaft', material: 'Silicon steel' },
+   292→   292→      { part: 'End caps', material: 'Cast aluminium' },
+   293→   293→      { part: 'Bearings', material: 'Dual ball bearing' },
+   294→   294→    ],
+   295→   295→    electrical: [
+   296→   296→      { label: 'Phase current', value: '1.68 A (chopper-controlled)' },
+   297→   297→      { label: 'Driver supply', value: '8 – 35 V (A4988/DRV8825)' },
+   298→   298→    ],
+   299→   299→    mechanical: [
+   300→   300→      { label: 'Holding torque', value: '0.59 N·m' },
+   301→   301→      { label: 'Positioning', value: '±0.05° (microstepping)' },
+   302→   302→    ],
+   303→   303→    simNotes:
+   304→   304→      'Open-loop positioning: count steps to know where you are. Model torque falloff with speed and add missed-step detection hints for high accelerations.',
+   305→   305→  },
+   306→   306→  commerce: {
+   307→   307→    manufacturer: 'LDO / OMC',
+   308→   308→    partNumber: '42STH47-1684',
+   309→   309→    priceUsd: [9, 15],
+   310→   310→    priceInr: [700, 1100],
+   311→   311→    availability: 'Ubiquitous — the 3D-printer workhorse',
+   312→   312→    vendors: ['Amazon', 'Robu.in', 'Eckart Tech'],
+   313→   313→  },
+   314→   314→  ai: {
+   315→   315→    summary: 'Open-loop precision positioning motor: moves in exact 1.8° steps with no feedback sensor.',
+   316→   316→    capabilities: [
+   317→   317→      'Exact incremental positioning (200 full steps/rev)',
+   318→   318→      'Holds position when energized',
+   319→   319→      'Microstepping for smooth, quiet motion',
+   320→   320→    ],
+   321→   321→    constraints: [
+   322→   322→      'Heavy — 350 g each; poor strength-to-weight vs servos',
+   323→   323→      'Skips steps under overload (silent failure)',
+   324→   324→      'Needs a current-controlled driver board, not a bare pin',
+   325→   325→    ],
+   326→   326→    bestFor: ['Gantry / CNC axes', 'Precise rotating platforms', 'Camera gimbals'],
+   327→   327→  },
+   328→   328→  model: {
+   329→   329→    kind: 'procedural',
+   330→   330→    component: 'StepperMotor',
+   331→   331→    dimensionAccurate: true,
+   332→   332→    note: 'Queued for procedural modeling.',
+   333→   333→  },
+   334→   334→}
+   335→   335→
+   336→   336→/** HC-SR04 ultrasonic rangefinder. */
+   337→   337→export const ULTRASONIC_SENSOR: RoboticsComponent = {
+   338→   338→  id: 'ultrasonic-sensor',
+   339→   339→  name: 'Ultrasonic Sensor',
+   340→   340→  category: 'Sensors',
+   341→   341→  status: 'soon',
+   342→   342→  tagline: 'HC-SR04 time-of-flight distance sensor, 2–400 cm range.',
+   343→   343→  description:
+   344→   344→    'The HC-SR04 bounces 40 kHz sound pulses off the nearest object and measures the echo time — a two-eyed distance sensor that works regardless of light or surface color. It is the default "eyes" of an obstacle-avoiding robot.',
+   345→   345→  specs: [
+   346→   346→    { label: 'Working voltage', value: '5 V DC' },
+   347→   347→    { label: 'Range', value: '2 – 400 cm' },
+   348→   348→    { label: 'Accuracy', value: '± 3 mm' },
+   349→   349→    { label: 'Beam angle', value: '~15°' },
+   350→   350→    { label: 'Trigger', value: '10 µs pulse → echo on return' },
+   351→   351→    { label: 'Dimensions', value: '45 × 20 × 15 mm' },
+   352→   352→  ],
+   353→   353→  physics: {
+   354→   354→    mass: 9,
+   355→   355→    dimensions: { l: 45, w: 20, h: 15 },
+   356→   356→    materials: [
+   357→   357→      { part: 'Body', material: 'ABS' },
+   358→   358→      { part: 'Transducers', material: 'Piezoelectric, aluminium can' },
+   359→   359→    ],
+   360→   360→    electrical: [
+   361→   361→      { label: 'Operating current', value: '~15 mA' },
+   362→   362→      { label: 'Logic', value: '5 V (3.3 V tolerant on Echo via divider)' },
+   363→   363→    ],
+   364→   364→    mechanical: [
+   365→   365→      { label: 'Update rate', value: 'up to ~20 Hz' },
+   366→   366→      { label: 'Beam', value: '15° cone at 40 kHz' },
+   367→   367→    ],
+   368→   368→    simNotes:
+   369→   369→      'Raycast a 15° cone, add gaussian noise of ±3 mm, and gate returns to 2–400 cm. Soft/angled surfaces should drop echoes, just like reality.',
+   370→   370→  },
+   371→   371→  commerce: {
+   372→   372→    manufacturer: 'Elecfreaks / generic',
+   373→   373→    partNumber: 'HC-SR04',
+   374→   374→    priceUsd: [1.5, 3],
+   375→   375→    priceInr: [120, 250],
+   376→   376→    availability: 'Cheapest usable robot sensor in existence',
+   377→   377→    vendors: ['Amazon', 'Robu.in', 'Any electronics shop'],
+   378→   378→  },
+   379→   379→  ai: {
+   380→   380→    summary: 'Time-of-flight distance sensor: measures 2–400 cm with 15° beam — the robot’s obstacle eyes.',
+   381→   381→    capabilities: [
+   382→   382→      'Measures distance to nearest object in a 15° cone',
+   383→   383→      'Works in darkness and on any surface color',
+   384→   384→      '±3 mm repeatable accuracy',
+   385→   385→    ],
+   386→   386→    constraints: [
+   387→   387→      'Blind below 2 cm',
+   388→   388→      'Soft fabric or steeply angled surfaces absorb/deflect the echo',
+   389→   389→      'Needs ~60 ms between reads to avoid echo cross-talk',
+   390→   390→    ],
+   391→   391→    bestFor: ['Obstacle avoidance', 'Wall following', 'Parking / docking distance'],
+   392→   392→  },
+   393→   393→  model: {
+   394→   394→    kind: 'procedural',
+   395→   395→    component: 'UltrasonicSensor',
+   396→   396→    dimensionAccurate: true,
+   397→   397→    note: 'Queued for procedural modeling.',
+   398→   398→  },
+   399→   399→}
+   400→   400→
+   401→   401→/** TCRT5000-based reflective IR sensor. */
+   402→   402→export const IR_SENSOR: RoboticsComponent = {
+   403→   403→  id: 'ir-sensor',
+   404→   404→  name: 'IR Proximity Sensor',
+   405→   405→  category: 'Sensors',
+   406→   406→  status: 'soon',
+   407→   407→  tagline: 'Reflective infrared sensor for line following and edge detection.',
+   408→   408→  description:
+   409→   409→    'An IR emitter/receiver pair that detects reflectance at close range. On a line-following robot, two or three of these straddle the line and steer the wheels; aimed downward past a table edge, they detect the drop-off before the robot does.',
+   410→   410→  specs: [
+   411→   411→    { label: 'Working voltage', value: '3.3 – 5 V' },
+   412→   412→    { label: 'Sensing range', value: '1 – 25 mm (analog)' },
+   413→   413→    { label: 'Output', value: 'Digital threshold + analog voltage' },
+   414→   414→    { label: 'Emitter', value: '940 nm infrared LED' },
+   415→   415→    { label: 'Dimensions', value: '38 × 10 × 12 mm (board)' },
+   416→   416→  ],
+   417→   417→  physics: {
+   418→   418→    mass: 5,
+   419→   419→    dimensions: { l: 38, w: 10, h: 12 },
+   420→   420→    materials: [
+   421→   421→      { part: 'PCB', material: 'FR4' },
+   422→   422→      { part: 'Sensor can', material: 'Plastic, TCRT5000' },
+   423→   423→    ],
+   424→   424→    electrical: [
+   425→   425→      { label: 'Operating current', value: '~20 mA' },
+   426→   426→      { label: 'Logic', value: '3.3 / 5 V compatible' },
+   427→   427→    ],
+   428→   428→    mechanical: [
+   429→   429→      { label: 'Response time', value: '< 1 ms' },
+   430→   430→      { label: 'Optimal height', value: '~8 mm above surface' },
+   431→   431→    ],
+   432→   432→    simNotes:
+   433→   433→      'Sample surface reflectance under the emitter: dark line → low value, white floor → high value. Add the 1–25 mm height window and ~1 ms latency.',
+   434→   434→  },
+   435→   435→  commerce: {
+   436→   436→    manufacturer: 'generic (TCRT5000)',
+   437→   437→    partNumber: 'TCRT5000-module',
+   438→   438→    priceUsd: [1, 2],
+   439→   439→    priceInr: [60, 150],
+   440→   440→    availability: 'Sold in packs of 5 — one robot uses 2–3',
+   441→   441→    vendors: ['Amazon', 'Robu.in', 'Electronics bazaars'],
+   442→   442→  },
+   443→   443→  ai: {
+   444→   444→    summary: 'Short-range reflective sensor: tells dark from light surfaces at 1–25 mm — the line follower’s eyes.',
+   445→   445→    capabilities: [
+   446→   446→      'Distinguishes dark/light surface reflectance',
+   447→   447→      'Digital + analog output on one board',
+   448→   448→      'Sub-millisecond response for fast steering loops',
+   449→   449→    ],
+   450→   450→    constraints: [
+   451→   451→      'Range is millimeters, not centimeters — mount 8 mm above ground',
+   452→   452→      'Fooled by glossy black surfaces and IR-rich sunlight',
+   453→   453→    ],
+   454→   454→    bestFor: ['Line following', 'Edge / cliff detection', 'Wheel encoder discs'],
+   455→   455→  },
+   456→   456→  model: {
+   457→   457→    kind: 'procedural',
+   458→   458→    component: 'IrProximitySensor',
+   459→   459→    dimensionAccurate: true,
+   460→   460→    note: 'Queued for procedural modeling.',
+   461→   461→  },
+   462→   462→}
+   463→   463→
+   464→   464→/** Brushed ESC with BEC. */
+   465→   465→export const ESC: RoboticsComponent = {
+   466→   466→  id: 'esc',
+   467→   467→  name: 'Speed Controller',
+   468→   468→  category: 'Controller',
+   469→   469→  status: 'soon',
+   470→   470→  tagline: 'Bidirectional brushed ESC with BEC and PWM input.',
+   471→   471→  description:
+   472→   472→    'An Electronic Speed Controller is the muscle between the battery and the DC motor: it switches tens of amps through an H-bridge in response to a small PWM signal from the microcontroller, and its BEC regulator feeds 5 V back out to power the logic.',
+   473→   473→  specs: [
+   474→   474→    { label: 'Motor support', value: 'Brushed DC, bidirectional' },
+   475→   475→    { label: 'Supply voltage', value: '7.2 – 16 V (2S–4S)' },
+   476→   476→    { label: 'Continuous current', value: '60 A' },
+   477→   477→    { label: 'BEC output', value: '5 V / 2 A for logic' },
+   478→   478→    { label: 'Input signal', value: 'PWM 50 Hz or 1–2 ms pulse' },
+   479→   479→    { label: 'Weight', value: '35 g' },
+   480→   480→  ],
+   481→   481→  physics: {
+   482→   482→    mass: 35,
+   483→   483→    dimensions: { l: 55, w: 28, h: 14 },
+   484→   484→    materials: [
+   485→   485→      { part: 'PCB', material: 'FR4, 2 oz copper' },
+   486→   486→      { part: 'MOSFET bank', material: 'Silicon, heatsink pad' },
+   487→   487→      { part: 'Case', material: 'Heat-shrink sleeve' },
+   488→   488→    ],
+   489→   489→    electrical: [
+   490→   490→      { label: 'Continuous current', value: '60 A with airflow' },
+   491→   491→      { label: 'Burst (10 s)', value: '80 A' },
+   492→   492→      { label: 'BEC', value: '5 V, 2 A (linear)' },
+   493→   493→    ],
+   494→   494→    mechanical: [
+   495→   495→      { label: 'Thermal', value: 'Derates above 60 ° case' },
+   496→   496→    ],
+   497→   497→    simNotes:
+   498→   498→      'The electrical router: enforces current limits and supply brown-out. Model BEC sag when motor stall current spikes — a realistic failure students should see coming.',
+   499→   499→  },
+   500→   500→  commerce: {
+   501→   501→    manufacturer: 'Hobbywing / generic',
+   502→   502→    partNumber: 'WP-60A-BR',
+   503→   503→    priceUsd: [12, 20],
+   504→   504→    priceInr: [900, 1600],
+   505→   505→    availability: 'RC hobby shops stock dozens of equivalents',
+   506→   506→    vendors: ['Amazon', 'HobbyKing', 'Robu.in'],
+   507→   507→  },
+   508→   508→  ai: {
+   509→   509→    summary: 'Power interface between battery and DC motor: PWM in, 60 A out, plus a 5 V supply for the brain.',
+   510→   510→    capabilities: [
+   511→   511→      'Drives brushed motors at up to 60 A continuous',
+   512→   512→      'Reverse and braking (H-bridge)',
+   513→   513→      'BEC powers the microcontroller from the motor battery',
+   514→   514→    ],
+   515→   515→    constraints: [
+   516→   516→      'Brushed only — brushless motors need a different ESC',
+   517→   517→      'Needs airflow at continuous high current',
+   518→   518→      'One ESC per motor (or a dual-board)',
+   519→   519→    ],
+   520→   520→    bestFor: ['Rover drive trains', 'Any DC motor above 2 A', 'Sharing one battery for motors + logic'],
+   521→   521→  },
+   522→   522→  model: {
+   523→   523→    kind: 'procedural',
+   524→   524→    component: 'SpeedController',
+   525→   525→    dimensionAccurate: true,
+   526→   526→    note: 'Queued for procedural modeling.',
+   527→   527→  },
+   528→   528→}
+   529→   529→
+   530→   530→/** 3S LiPo pack. */
+   531→   531→export const LIPO_BATTERY: RoboticsComponent = {
+   532→   532→  id: 'lipo-battery',
+   533→   533→  name: 'LiPo Battery Pack',
+   534→   534→  category: 'Power',
+   535→   535→  status: 'soon',
+   536→   536→  tagline: '3S 11.1 V lithium polymer pack with XT60 connector.',
+   537→   537→  description:
+   538→   538→    'The energy tank. A 3-cell lithium polymer pack delivers 11.1 V nominal at high discharge rates in a featherweight package — the standard power source for anything that moves. It demands respect: low-voltage cutoffs and fire-safe charging.',
+   539→   539→  specs: [
+   540→   540→    { label: 'Configuration', value: '3S (11.1 V nominal, 12.6 V full)' },
+   541→   541→    { label: 'Capacity', value: '2200 mAh' },
+   542→   542→    { label: 'Discharge', value: '25C continuous (55 A)' },
+   543→   543→    { label: 'Connector', value: 'XT60' },
+   544→   544→    { label: 'Dimensions', value: '105 × 33 × 24 mm' },
+   545→   545→    { label: 'Weight', value: '185 g' },
+   546→   546→  ],
+   547→   547→  physics: {
+   548→   548→    mass: 185,
+   549→   549→    dimensions: { l: 105, w: 33, h: 24 },
+   550→   550→    materials: [
+   551→   551→      { part: 'Cells', material: 'Lithium polymer, aluminium pouch' },
+   552→   552→      { part: 'Wrap', material: 'Vinyl heat-shrink' },
+   553→   553→      { part: 'Leads', material: 'Silicone, 12 AWG' },
+   554→   554→    ],
+   555→   555→    electrical: [
+   556→   556→      { label: 'Capacity', value: '2200 mAh' },
+   557→   557→      { label: 'Max continuous', value: '55 A (25C)' },
+   558→   558→      { label: 'Storage voltage', value: '11.4 V (3.8 V/cell)' },
+   559→   559→    ],
+   560→   560→    mechanical: [
+   561→   561→      { label: 'Do not puncture', value: 'Pouch cells deform — no sharp mounts' },
+   562→   562→    ],
+   563→   563→    simNotes:
+   564→   564→      'The global constraint every design must satisfy: model capacity drain from total current draw, sag under load, and a 9.9 V (3.3 V/cell) floor where performance collapses.',
+   565→   565→  },
+   566→   566→  commerce: {
+   567→   567→    manufacturer: 'Orange / Turnigy',
+   568→   568→    partNumber: 'OX-3S-2200',
+   569→   569→    priceUsd: [15, 25],
+   570→   570→    priceInr: [1200, 2000],
+   571→   571→    availability: 'RC shops; always buy with a balance charger',
+   572→   572→    vendors: ['Robu.in', 'HobbyKing', 'Amazon'],
+   573→   573→  },
+   574→   574→  ai: {
+   575→   575→    summary: 'The power budget: 11.1 V / 2200 mAh / 55 A — every motor choice must fit inside it.',
+   576→   576→    capabilities: [
+   577→   577→      'High current in a light 185 g package',
+   578→   578→      'Stable 11.1 V rail for motors and logic (via BEC)',
+   579→   579→    ],
+   580→   580→    constraints: [
+   581→   581→      'Runtime = capacity ÷ total draw — budget it before adding motors',
+   582→   582→      'Never drain below 3.3 V/cell (permanent damage)',
+   583→   583→      'Mount away from sharp edges; pouch cells puncture',
+   584→   584→    ],
+   585→   585→    bestFor: ['Any untethered robot', 'Teaching the power-budget lesson'],
+   586→   586→  },
+   587→   587→  model: {
+   588→   588→    kind: 'procedural',
+   589→   589→    component: 'LipoBattery',
+   590→   590→    dimensionAccurate: true,
+   591→   591→    note: 'Queued for procedural modeling.',
+   592→   592→  },
+   593→   593→}
+   594→   594→
+   595→   595→/* ------------------------------------------------------------------ */
+   596→   596→/* The catalog                                                         */
+   597→   597→/* ------------------------------------------------------------------ */
+   598→   598→
+   599→   599→export const COMPONENTS: RoboticsComponent[] = [
+   600→   600→  SERVO,
+   601→   601→  DC_MOTOR,
+   602→   602→  STEPPER_MOTOR,
+   603→   603→  ULTRASONIC_SENSOR,
+   604→   604→  IR_SENSOR,
+   605→   605→  ESC,
+   606→   606→  LIPO_BATTERY,
+   607→   607→]
+   608→   608→
+   609→   609→export function getComponent(id: string): RoboticsComponent | undefined {
+   610→   610→  return COMPONENTS.find((c) => c.id === id)
+   611→   611→}
+   612→   612→
+   613→   613→/**
+   614→   614→ * The machine-readable catalog — exactly what the AI generation layer
+   615→   615→ * (Pillar 2) will be fed as tool/context when a user says "build me a
+   616→   616→ * line-following robot that avoids obstacles". Geometry references are
+   617→   617→ * stripped; capabilities, constraints, ports, physics and cost remain.
+   618→   618→ */
+   619→   619→export function aiCatalogPayload() {
+   620→   620→  return {
+   621→   621→    schema: 'robotics-platform.catalog/1.0',
+   622→   622→    generatedAt: new Date().toISOString(),
+   623→   623→    componentCount: COMPONENTS.length,
+   624→   624→    components: COMPONENTS.map((c) => ({
+   625→   625→      id: c.id,
+   626→   626→      name: c.name,
+   627→   627→      category: c.category,
+   628→   628→      status: c.status,
+   629→   629→      tagline: c.tagline,
+   630→   630→      mass_g: c.physics.mass,
+   631→   631→      dimensions_mm: c.physics.dimensions,
+   632→   632→      price_usd: c.commerce.priceUsd,
+   633→   633→      part_number: c.commerce.partNumber,
+   634→   634→      ports: c.connectionModel?.ports.length ?? 0,
+   635→   635→      dof: c.connectionModel?.dof.map((d) => ({
+   636→   636→        id: d.id,
+   637→   637→        kind: d.kind,
+   638→   638→        range_deg: d.range,
+   639→   639→        axis: d.axis,
+   640→   640→      })) ?? [],
+   641→   641→      ai: c.ai,
+   642→   642→      key_specs: c.specs.slice(0, 4).map((s) => `${s.label}: ${s.value}`),
+   643→   643→    })),
+   644→   644→  }
+   645→   645→}
+   646→   646→
