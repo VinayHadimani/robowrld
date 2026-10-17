@@ -23,6 +23,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import {
+  getPort,
   isPowerSource,
   poweredIds as computePoweredIds,
   type Attach,
@@ -31,7 +32,7 @@ import {
   type PlayComponent,
   type PlayInstance,
 } from '@/lib/playground'
-import type { LiveCandidate, StageActions, WireAnchors } from './PlaygroundStage'
+import type { LiveCandidate, StageActions, AnchorMap } from './PlaygroundStage'
 
 const PlaygroundStage = dynamic(() => import('./PlaygroundStage'), { ssr: false })
 
@@ -40,13 +41,15 @@ const PlaygroundStage = dynamic(() => import('./PlaygroundStage'), { ssr: false 
  * Toolbar (add / run / clear) + the 3D canvas + a small panel for the
  * selected component.
  *
- * Power rule: a component only runs while it is attached — directly or
- * through a chain of attached components — to a power source (a 9V
- * battery). Free-standing components stay still no matter what.
+ * Power rule (real life): a component only runs while a valid wire path
+ * leads back to a power source. The 9V battery feeds motors directly
+ * and the controller's VIN jack; the controller's 5 V pins feed servos.
+ * A servo NEVER wires straight to the 9V battery — 9 V is outside its
+ * 4.8–7.2 V range, so the app refuses, exactly like real parts.
  *
  * Connection rule: nothing snaps together on its own. Bring a component
  * near another one and the app ASKS FOR PERMISSION — "Connect" wires
- * them, "Don't connect" leaves them apart.
+ * them between the real connectors, "Don't connect" leaves them apart.
  */
 export function Playground({
   components,
@@ -64,14 +67,14 @@ export function Playground({
   onRemove: (id: string) => void
   onDropCommit: (moves: Move[], attach: Attach | null) => void
   /** Wire two components together after the user grants permission. */
-  onAttach: (childId: string, parentId: string) => void
+  onAttach: (childId: string, parentId: string, parentPort: string, childPort: string) => void
   onDetach: (id: string) => void
   onClear: () => void
 }) {
   const [running, setRunning] = React.useState(true)
   const [selectedId, setSelectedId] = React.useState<string | null>(null)
   const groups = useRef<Map<string, THREE.Group>>(new Map())
-  const anchors = useRef<Map<string, WireAnchors>>(new Map())
+  const anchors = useRef<AnchorMap>(new Map())
   // The connection waiting for the user's answer, plus the live proximity
   // target (for the toolbar hint) and the bridge into the canvas.
   const [request, setRequest] = React.useState<ConnectRequest | null>(null)
@@ -93,10 +96,14 @@ export function Playground({
   )
 
   // A component was dropped near a connectable one — ask for permission.
-  const handleConnectRequest = useCallback((childId: string, parentId: string) => {
-    answered.current = false
-    setRequest({ childId, parentId })
-  }, [])
+  // The parent is the side that provides power.
+  const handleConnectRequest = useCallback(
+    (parentId: string, childId: string, parentPort: string, childPort: string) => {
+      answered.current = false
+      setRequest({ childId, parentId, parentPort, childPort })
+    },
+    []
+  )
 
   const handleCandidateChange = useCallback((c: LiveCandidate | null) => {
     setCandidate(c)
@@ -106,7 +113,7 @@ export function Playground({
     answered.current = true
     const req = request
     setRequest(null)
-    if (req) onAttach(req.childId, req.parentId)
+    if (req) onAttach(req.childId, req.parentId, req.parentPort, req.childPort)
   }, [request, onAttach])
 
   const declineConnect = useCallback(() => {
@@ -122,6 +129,15 @@ export function Playground({
   const requestChild = request ? instances.find((i) => i.id === request.childId) : null
   const requestParent = request ? instances.find((i) => i.id === request.parentId) : null
   const candidateInst = candidate ? instances.find((i) => i.id === candidate.id) : null
+
+  // Port labels for the dialog — what actually gets wired to what.
+  const parentPort = requestParent
+    ? getPort(requestParent.kind, request?.parentPort ?? null)
+    : undefined
+  const childPort = requestChild
+    ? getPort(requestChild.kind, request?.childPort ?? null)
+    : undefined
+  const ribbon = childPort?.wire === 'ribbon3'
 
   return (
     <div className="flex h-[calc(100dvh-3rem)] w-full flex-col">
@@ -175,12 +191,12 @@ export function Playground({
           </Button>
         )}
 
-        <span className="ml-auto hidden text-xs text-muted-foreground sm:block">
+        <span className="ml-auto hidden max-w-xl truncate text-xs text-muted-foreground sm:block">
           {candidateInst && candidate
             ? candidate.connectable
               ? `Release to ask about connecting to ${candidateInst.name}`
-              : `${candidateInst.name} can't connect — batteries power components, not each other`
-            : "Bring components close and you'll be asked before they connect · only battery-powered components run"}
+              : `${candidateInst.name}: ${candidate.reason}`
+            : 'Connections work like real life — only compatible parts can be wired · components run only with a valid power path'}
         </span>
       </div>
 
@@ -202,8 +218,9 @@ export function Playground({
 
         {instances.length === 0 && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-            <p className="rounded-lg bg-background/80 px-4 py-2 text-sm text-muted-foreground backdrop-blur-sm">
-              Nothing here yet — add a 9V battery and connect components to it to make them run.
+            <p className="max-w-md rounded-lg bg-background/80 px-4 py-2 text-center text-sm text-muted-foreground backdrop-blur-sm">
+              Nothing here yet — add a 9V battery, wire components to its terminals, and make
+              them run. Servos need a controller between them and the battery.
             </p>
           </div>
         )}
@@ -215,15 +232,24 @@ export function Playground({
               className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs ${
                 isPowerSource(selected.kind)
                   ? 'bg-emerald-100 text-emerald-800'
-                  : selectedPowered
-                    ? 'bg-emerald-100 text-emerald-800'
-                    : 'bg-muted text-muted-foreground'
+                  : selected.kind === 'controller'
+                    ? powered.has(selected.id)
+                      ? 'bg-emerald-100 text-emerald-800'
+                      : 'bg-muted text-muted-foreground'
+                    : selectedPowered
+                      ? 'bg-emerald-100 text-emerald-800'
+                      : 'bg-muted text-muted-foreground'
               }`}
             >
               {isPowerSource(selected.kind) ? (
                 <>
                   <PlugZap className="h-3 w-3" aria-hidden />
                   Power source
+                </>
+              ) : selected.kind === 'controller' ? (
+                <>
+                  <PlugZap className="h-3 w-3" aria-hidden />
+                  {powered.has(selected.id) ? 'Powered' : 'Needs power'}
                 </>
               ) : selectedPowered ? (
                 <>
@@ -263,7 +289,7 @@ export function Playground({
       </div>
 
       {/* Permission to connect — asked whenever a component is brought
-          near another connectable one. */}
+          near another one it could REALLY connect to. */}
       <AlertDialog
         open={request !== null}
         onOpenChange={(open) => {
@@ -276,8 +302,11 @@ export function Playground({
               Connect {requestChild?.name ?? 'this component'} to {requestParent?.name ?? 'that one'}?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              They will be wired together so power can flow between them — only components
-              connected to a battery run. Nothing is connected until you allow it.
+              This wires the {requestChild?.name ?? 'component'}&rsquo;s{' '}
+              {childPort?.label ?? 'power leads'} to the {requestParent?.name ?? 'other part'}&rsquo;s{' '}
+              {parentPort?.label ?? 'terminals'}
+              {ribbon ? ' with a 3-wire signal cable.' : ' — red to +, black to −.'} Only
+              components with a real power path to a battery run.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

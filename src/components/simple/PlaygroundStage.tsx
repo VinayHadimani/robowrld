@@ -5,20 +5,28 @@
  *
  * Interaction model:
  *   - pointer-down on a component → grab it (orbit controls freeze); its
- *     whole attached group comes along — attached things move together
+ *     whole connected group comes along — wired things move together
  *   - move → the group slides along the ground plane (imperative, no
  *     re-renders); the nearest foreign component in reach gets a pulsing
- *     ring: green when the pair may connect, red when it may not
+ *     ring: green when the pair may REALLY connect, red when it may not
  *   - release near a CONNECTABLE neighbour → the piece slides into the
  *     connected spot as a preview and the app ASKS FOR PERMISSION; only a
- *     "Connect" answer wires them together (red + black power wires) —
- *     "Don't connect" pushes the piece back out, unwired
- *   - release near a NON-connectable pair (battery onto battery) → nothing
- *     happens; they simply can't be connected
+ *     "Connect" answer wires them together
+ *   - release near a NON-connectable pair (e.g. a servo onto a 9V
+ *     battery — 9 V is outside its 4.8–7.2 V range) → nothing happens;
+ *     they simply can't be connected, like real life
  *   - a click without movement → select (ring + panel)
- *   - Run → only components CONNECTED (directly or through a chain) to a
- *     power source animate; everything else stays still. The battery's
- *     LED lights while it is powering something.
+ *   - Run → only components with a valid wire path to a power source
+ *     animate; everything else stays still. Battery and board LEDs light
+ *     while they are actually powering something.
+ *
+ * Wiring is drawn BETWEEN REAL PORTS: each connection renders a cable
+ * from the provider's port (the battery's brass +/− snap terminals, the
+ * controller's 5 V header) to the consumer's port (a motor's leads, a
+ * servo's signal cable, the board's VIN jack). Power splices are a red +
+ * black pair (red always on +); servo-style links are a 3-wire ribbon.
+ * When one battery feeds several components, their wire pairs fan out
+ * side by side from the same two terminals — like stacked spade lugs.
  *
  * Positions are applied ONCE on mount (never via the `position` prop) so a
  * re-render mid-drag can never snap a component back to a stale spot.
@@ -38,10 +46,13 @@ import {
 import { ServoMotor } from '@/components/three/ServoMotor'
 import { GltfModel } from '@/components/three/GltfModel'
 import { Battery9V, BATTERY_TERMINALS } from '@/components/three/Battery9V'
+import { ArduinoUno, ARDUINO_ANCHORS } from '@/components/three/ArduinoUno'
 import {
-  anchorYFor,
-  areConnectable,
+  ELEC_PORTS,
+  batteriesWithLoad,
+  connectBetween,
   footprintFor,
+  getPort,
   groupMembers,
   sweepFor,
   subtreeIds,
@@ -57,11 +68,16 @@ const SNAP_REACH = 1.35
 const SNAP_GAP = 0.55
 /** How far a DECLINED component is pushed back out of the preview spot. */
 const DECLINE_GAP = 1.2
+/** Lateral spacing between wire pairs sharing one battery terminal. */
+const TERMINAL_SPREAD = 0.17
+/** How far cables bow toward the camera side, clearing the source body. */
+const BOW = 1.35
 
-/** The live proximity state: which neighbour is in reach, and may it connect? */
+/** The live proximity state: which neighbour is in reach, may it connect, why/why not. */
 export interface LiveCandidate {
   id: string
   connectable: boolean
+  reason: string
 }
 
 /** Imperative bridge so the React layer can finish a declined connection. */
@@ -69,11 +85,15 @@ export interface StageActions {
   separate?: (childId: string, parentId: string) => void
 }
 
-/** Wire endpoints registered per instance — where the power wires clip on. */
-export interface WireAnchors {
-  a: THREE.Object3D
-  b: THREE.Object3D
+/**
+ * Wire clip points registered per instance, per electrical port:
+ * `red` is the + lead anchor, `black` the − lead (ribbon ports share one).
+ */
+export interface PortAnchor {
+  red: THREE.Object3D
+  black: THREE.Object3D
 }
+export type AnchorMap = Map<string, Map<string, PortAnchor>>
 
 /* ---------- helpers ---------- */
 
@@ -108,28 +128,43 @@ class LoadBoundary extends React.Component<
   }
 }
 
-/* ---------- power wires ---------- */
+/* ---------- cables between real ports ---------- */
 
 /**
- * One wire between a parent's and a child's anchor. The tube geometry is
- * rebuilt in useFrame only when an endpoint actually moved — so wires stay
- * glued to their components even during imperative (mid-drag) moves, at
- * zero React render cost.
+ * One cable between two anchor objects. The tube geometry is rebuilt in
+ * useFrame only when an endpoint actually moved — so cables stay glued
+ * to their components even during imperative (mid-drag) moves, at zero
+ * React render cost. `offsetA` shifts the provider-side clip point
+ * (battery terminal fan-out); ribbon wires shift perpendicular to the
+ * run so the three leads sit side by side like a flat cable.
  */
-function Wire({
+function Cable({
   anchors,
   parentId,
+  parentPortId,
   childId,
+  childPortId,
   side,
   color,
   live,
+  spread,
+  lateral,
+  radius,
 }: {
-  anchors: React.RefObject<Map<string, WireAnchors>>
+  anchors: React.RefObject<AnchorMap>
   parentId: string
+  parentPortId: string
   childId: string
-  side: 'a' | 'b'
+  childPortId: string
+  /** Which lead of each port this cable carries ('red' | 'black'). */
+  side: 'red' | 'black'
   color: string
   live: boolean
+  /** Provider-side lateral fan-out at a shared terminal (world X). */
+  spread: number
+  /** Consumer-side perpendicular offset (ribbon wires; world space). */
+  lateral: number
+  radius: number
 }) {
   const mesh = useRef<THREE.Mesh>(null)
   const lastA = useRef(new THREE.Vector3(1e9, 1e9, 1e9))
@@ -140,40 +175,70 @@ function Wire({
       b: new THREE.Vector3(),
       ctrl: new THREE.Vector3(),
       mid: new THREE.Vector3(),
+      dir: new THREE.Vector3(),
+      perp: new THREE.Vector3(),
     }),
     []
   )
 
-  useFrame(() => {
+  useFrame((state) => {
     const m = mesh.current
     if (!m) return
-    const parent = anchors.current?.get(parentId)
-    const child = anchors.current?.get(childId)
-    if (!parent || !child) {
+    const parentPort = anchors.current?.get(parentId)?.get(parentPortId)
+    const childPort = anchors.current?.get(childId)?.get(childPortId)
+    if (!parentPort || !childPort) {
       m.visible = false
       return
     }
     m.visible = true
-    ;(side === 'a' ? parent.a : parent.b).getWorldPosition(tmp.a)
-    ;(side === 'a' ? child.a : child.b).getWorldPosition(tmp.b)
+    ;(side === 'red' ? parentPort.red : parentPort.black).getWorldPosition(tmp.a)
+    ;(side === 'red' ? childPort.red : childPort.black).getWorldPosition(tmp.b)
+
+    // Provider-side terminal fan-out.
+    tmp.a.setX(tmp.a.x + spread)
+    // Consumer-side perpendicular ribbon offset (only when nonzero).
+    if (lateral !== 0) {
+      tmp.dir.subVectors(tmp.b, tmp.a).setY(0)
+      if (tmp.dir.lengthSq() > 1e-6) {
+        tmp.perp.set(-tmp.dir.z, 0, tmp.dir.x).normalize().multiplyScalar(lateral)
+        tmp.b.add(tmp.perp)
+      }
+    }
+
     if (
       tmp.a.distanceToSquared(lastA.current) < 1e-8 &&
-      tmp.b.distanceToSquared(lastB.current) < 1e-8
+      tmp.b.distanceToSquared(lastB.current) < 1e-8 &&
+      m.geometry.type === 'TubeGeometry'
     ) {
       return
     }
     lastA.current.copy(tmp.a)
     lastB.current.copy(tmp.b)
-    // A gentle sag between the two clip points, never dipping under the floor.
+
+    // The cable sags between the two clip points — and bows toward the
+    // camera side, so it arcs AROUND the provider's own body instead of
+    // disappearing behind it when the consumer sits around the back.
     tmp.mid.addVectors(tmp.a, tmp.b).multiplyScalar(0.5)
     const sagY = Math.max(0.32, Math.min(tmp.a.y, tmp.b.y) - 0.5)
-    tmp.ctrl.set(tmp.mid.x, sagY, tmp.mid.z)
+    let bowX = 0
+    let bowZ = 0
+    tmp.dir.subVectors(tmp.b, tmp.a).setY(0)
+    if (tmp.dir.lengthSq() > 1e-6) {
+      tmp.perp.set(-tmp.dir.z, 0, tmp.dir.x).normalize()
+      const camX = state.camera.position.x
+      const camZ = state.camera.position.z
+      const toCam = (camX - tmp.mid.x) * tmp.perp.x + (camZ - tmp.mid.z) * tmp.perp.z
+      const sign = toCam >= 0 ? 1 : -1
+      bowX = tmp.perp.x * sign * BOW
+      bowZ = tmp.perp.z * sign * BOW
+    }
+    tmp.ctrl.set(tmp.mid.x + bowX, sagY, tmp.mid.z + bowZ)
     const curve = new THREE.QuadraticBezierCurve3(
       tmp.a.clone(),
       tmp.ctrl.clone(),
       tmp.b.clone()
     )
-    const geom = new THREE.TubeGeometry(curve, 24, 0.11, 10, false)
+    const geom = new THREE.TubeGeometry(curve, 24, radius, 10, false)
     m.geometry.dispose()
     m.geometry = geom
   })
@@ -184,29 +249,51 @@ function Wire({
         color={color}
         roughness={0.38}
         metalness={0.12}
-        emissive={live && side === 'a' ? '#b91c1c' : '#000000'}
-        emissiveIntensity={live && side === 'a' ? 0.85 : 0}
+        emissive={live ? '#b91c1c' : '#000000'}
+        emissiveIntensity={live ? (side === 'red' ? 0.85 : 0.3) : 0}
       />
     </mesh>
   )
 }
 
-/** The red + black wire pair drawn for every attached parent→child link. */
-function WirePair({
+/**
+ * The cable(s) for one wired link, styled by the consumer's port:
+ * a red + black power pair for splices, or an orange/red/brown 3-wire
+ * ribbon for servo-style signal leads.
+ */
+function LinkWire({
   anchors,
   parentId,
+  parentPortId,
   childId,
+  childPortId,
+  wire,
   live,
+  spread,
 }: {
-  anchors: React.RefObject<Map<string, WireAnchors>>
+  anchors: React.RefObject<AnchorMap>
   parentId: string
+  parentPortId: string
   childId: string
+  childPortId: string
+  wire: 'pair' | 'ribbon3'
   live: boolean
+  /** Fan-out index at the provider's terminal (multiple consumers). */
+  spread: number
 }) {
+  if (wire === 'ribbon3') {
+    return (
+      <>
+        <Cable anchors={anchors} parentId={parentId} parentPortId={parentPortId} childId={childId} childPortId={childPortId} side="red" color="#f97316" live={live} spread={0} lateral={-0.13} radius={0.075} />
+        <Cable anchors={anchors} parentId={parentId} parentPortId={parentPortId} childId={childId} childPortId={childPortId} side="red" color="#dc2626" live={live} spread={0} lateral={0} radius={0.075} />
+        <Cable anchors={anchors} parentId={parentId} parentPortId={parentPortId} childId={childId} childPortId={childPortId} side="black" color="#78350f" live={live} spread={0} lateral={0.13} radius={0.075} />
+      </>
+    )
+  }
   return (
     <>
-      <Wire anchors={anchors} parentId={parentId} childId={childId} side="a" color="#d92626" live={live} />
-      <Wire anchors={anchors} parentId={parentId} childId={childId} side="b" color="#23262d" live={live} />
+      <Cable anchors={anchors} parentId={parentId} parentPortId={parentPortId} childId={childId} childPortId={childPortId} side="red" color="#d92626" live={live} spread={spread} lateral={0} radius={0.11} />
+      <Cable anchors={anchors} parentId={parentId} parentPortId={parentPortId} childId={childId} childPortId={childPortId} side="black" color="#23262d" live={live} spread={spread} lateral={0} radius={0.11} />
     </>
   )
 }
@@ -220,13 +307,19 @@ interface Candidate {
   z: number
   dist: number
   connectable: boolean
+  reason: string
+  outId: string
+  inId: string
+  outPortId: string
+  inPortId: string
 }
 
 /**
  * The nearest foreign instance within snap reach of the dragged group —
- * null when nothing is close enough. `connectable` decides whether a
- * permission prompt is offered at all (batteries never chain onto
- * batteries, so that pair stays silent).
+ * null when nothing is close enough. `connectable` + `reason` come from
+ * the REAL-LIFE port matching: one side must provide power the other
+ * accepts (a 9V battery onto a servo is refused — 9 V is outside the
+ * MG996R's 4.8–7.2 V range).
  */
 function findCandidate(
   insts: PlayInstance[],
@@ -238,27 +331,33 @@ function findCandidate(
   const byId = new Map(insts.map((i) => [i.id, i]))
   const grabbedInst = byId.get(grabbedId)
   if (!grabbedInst) return null
-  let nearest: { id: string; x: number; z: number; dist: number; kind: PlayInstance['kind'] } | null = null
+  let nearest: { id: string; x: number; z: number; dist: number } | null = null
   for (const other of insts) {
     if (members.includes(other.id)) continue
     const g = groups.current?.get(other.id)
     if (!g) continue
     const dist = Math.hypot(g.position.x - pos.x, g.position.z - pos.z)
     if (!nearest || dist < nearest.dist) {
-      nearest = { id: other.id, x: g.position.x, z: g.position.z, dist, kind: other.kind }
+      nearest = { id: other.id, x: g.position.x, z: g.position.z, dist }
     }
   }
   if (!nearest) return null
-  const reach = footprintFor(grabbedInst.kind) + footprintFor(nearest.kind) + SNAP_REACH
+  const reach = footprintFor(grabbedInst.kind) + footprintFor(byId.get(nearest.id)?.kind ?? 'gltf') + SNAP_REACH
   if (nearest.dist >= reach) return null
   const targetInst = byId.get(nearest.id)
   if (!targetInst) return null
+  const match = connectBetween(grabbedInst, targetInst)
   return {
     id: nearest.id,
     x: nearest.x,
     z: nearest.z,
     dist: nearest.dist,
-    connectable: areConnectable(grabbedInst, targetInst),
+    connectable: match.ok,
+    reason: match.reason,
+    outId: match.outId,
+    inId: match.inId,
+    outPortId: match.outPortId,
+    inPortId: match.inPortId,
   }
 }
 
@@ -290,6 +389,72 @@ function PulseRing({ radius, connectable }: { radius: number; connectable: boole
 
 /* ---------- one placed component ---------- */
 
+/**
+ * Register the wire-clip anchors for one instance — the REAL connectors:
+ * the battery's two brass snap terminals, the controller's VIN jack and
+ * 5 V header, the servo's cable exit, nominal lead posts on uploads.
+ */
+function usePortAnchors(
+  ref: React.RefObject<THREE.Group | null>,
+  inst: PlayInstance,
+  anchors: React.RefObject<AnchorMap>
+) {
+  useEffect(() => {
+    const g = ref.current
+    if (!g) return
+    const map = new Map<string, PortAnchor>()
+    const created: THREE.Object3D[] = []
+
+    const addSingle = (portId: string, pos: [number, number, number]) => {
+      const o = new THREE.Object3D()
+      o.position.set(pos[0], pos[1], pos[2])
+      g.add(o)
+      created.push(o)
+      map.set(portId, { red: o, black: o })
+    }
+    const addPair = (
+      portId: string,
+      plus: [number, number, number],
+      minus: [number, number, number]
+    ) => {
+      const r = new THREE.Object3D()
+      r.position.set(plus[0], plus[1], plus[2])
+      const b = new THREE.Object3D()
+      b.position.set(minus[0], minus[1], minus[2])
+      g.add(r)
+      g.add(b)
+      created.push(r, b)
+      map.set(portId, { red: r, black: b })
+    }
+
+    if (inst.kind === 'battery') {
+      // The two real PP3 snap terminals on top — red goes to + (plus).
+      addPair(
+        'pp3',
+        [BATTERY_TERMINALS.plus[0], BATTERY_TERMINALS.plus[1], 0],
+        [BATTERY_TERMINALS.minus[0], BATTERY_TERMINALS.minus[1], 0]
+      )
+    } else if (inst.kind === 'controller') {
+      // VIN jack (pair) + 5 V pin header (servo ribbon).
+      addPair('vin', ARDUINO_ANCHORS.vin.plus, ARDUINO_ANCHORS.vin.minus)
+      addSingle('hdr', ARDUINO_ANCHORS.header)
+    } else if (inst.kind === 'servo') {
+      // The cable exit grommet on the rear of the body.
+      addSingle('plug', [-2.5, 1.6, 0])
+    } else {
+      // Uploaded models: nominal power lead posts on top.
+      const y = 2.35
+      addPair('leads', [0.45, y, 0], [-0.45, y, 0])
+    }
+
+    anchors.current?.set(inst.id, map)
+    return () => {
+      anchors.current?.delete(inst.id)
+      for (const o of created) g.remove(o)
+    }
+  }, [inst.id, inst.kind, ref, anchors])
+}
+
 function Instance({
   inst,
   running,
@@ -308,7 +473,7 @@ function Instance({
   selected: boolean
   candidate: LiveCandidate | null
   groups: React.RefObject<Map<string, THREE.Group>>
-  anchors: React.RefObject<Map<string, WireAnchors>>
+  anchors: React.RefObject<AnchorMap>
   onDragStart: (e: ThreeEvent<PointerEvent>, id: string) => void
 }) {
   const ref = useRef<THREE.Group>(null)
@@ -318,32 +483,10 @@ function Instance({
     if (!g) return
     g.position.set(inst.x, 0, inst.z)
     groups.current?.set(inst.id, g)
-
-    // Wire clip points: the battery's real snap terminals, a nominal pair
-    // of posts on top of everything else.
-    const isBattery = inst.kind === 'battery'
-    const y = isBattery ? 0 : anchorYFor(inst.kind)
-    const a = new THREE.Object3D()
-    const b = new THREE.Object3D()
-    if (isBattery) {
-      a.position.set(BATTERY_TERMINALS.minus[0], BATTERY_TERMINALS.minus[1], 0)
-      b.position.set(BATTERY_TERMINALS.plus[0], BATTERY_TERMINALS.plus[1], 0)
-    } else {
-      a.position.set(-0.45, y, 0)
-      b.position.set(0.45, y, 0)
-    }
-    g.add(a)
-    g.add(b)
-    anchors.current?.set(inst.id, { a, b })
-
-    return () => {
-      groups.current?.delete(inst.id)
-      g.remove(a)
-      g.remove(b)
-      anchors.current?.delete(inst.id)
-    }
     // Position is set imperatively; inst.x/z only matter at mount.
-  }, [inst.id, inst.x, inst.z, inst.kind, groups, anchors])
+  }, [inst.id, inst.x, inst.z, groups])
+
+  usePortAnchors(ref, inst, anchors)
 
   const live = running && powered
   const ringRadius = footprintFor(inst.kind)
@@ -370,6 +513,8 @@ function Instance({
         />
       ) : inst.kind === 'battery' ? (
         <Battery9V position={[0, 0.03, 0]} ledOn={running && energized} />
+      ) : inst.kind === 'controller' ? (
+        <ArduinoUno position={[0, 0.03, 0]} ledOn={running && powered} />
       ) : inst.modelUrl ? (
         <SpinGroup running={live}>
           <Suspense fallback={null}>
@@ -403,12 +548,18 @@ function Scene({
   poweredIds: Set<string>
   selectedId: string | null
   groups: React.RefObject<Map<string, THREE.Group>>
-  anchors: React.RefObject<Map<string, WireAnchors>>
+  anchors: React.RefObject<AnchorMap>
   onSelect: (id: string) => void
   onDropCommit: (moves: Move[], attach: Attach | null) => void
   /** Fired when a component is dropped near a connectable one — the app
-      must ASK FOR PERMISSION; nothing is wired until it answers. */
-  onConnectRequest: (childId: string, parentId: string) => void
+      must ASK FOR PERMISSION; nothing is wired until it answers.
+      The parent is the side that PROVIDES power. */
+  onConnectRequest: (
+    parentId: string,
+    childId: string,
+    parentPortId: string,
+    childPortId: string
+  ) => void
   /** Live proximity feedback (the pulsing-ring target), or null. */
   onCandidateChange: (candidate: LiveCandidate | null) => void
   actionsRef: React.RefObject<StageActions>
@@ -423,20 +574,26 @@ function Scene({
   }, [instances])
 
   // A battery's LED means "power is flowing" — lit only while it is
-  // actually attached to at least one other component.
-  const batteriesWithLoad = useMemo(() => {
-    const set = new Set<string>()
+  // actually wired to something it can power.
+  const loadedBatteries = useMemo(() => batteriesWithLoad(instances), [instances])
+
+  // Per-parent fan-out indices: when one battery feeds several
+  // consumers, their wire pairs attach side by side on the terminals.
+  const terminalSpread = useMemo(() => {
+    const byParent = new Map<string, string[]>()
     for (const inst of instances) {
-      if (inst.kind !== 'battery') continue
-      const group = groupMembers(instances, inst.id)
-      for (const memberId of group) {
-        if (memberId !== inst.id && instances.find((i) => i.id === memberId)?.kind !== 'battery') {
-          set.add(inst.id)
-          break
-        }
-      }
+      if (!inst.parentId) continue
+      const list = byParent.get(inst.parentId) ?? []
+      list.push(inst.id)
+      byParent.set(inst.parentId, list)
     }
-    return set
+    const spread = new Map<string, number>()
+    for (const siblings of byParent.values()) {
+      siblings.forEach((childId, i) => {
+        spread.set(childId, (i - (siblings.length - 1) / 2) * TERMINAL_SPREAD)
+      })
+    }
+    return spread
   }, [instances])
 
   // Which neighbour is currently in reach (for the pulsing ring + hint).
@@ -474,7 +631,7 @@ function Scene({
       e.stopPropagation()
       const grabbed = groups.current?.get(id)
       if (!grabbed) return
-      // The whole attached group travels together.
+      // The whole wired group travels together.
       const members = [...groupMembers(instancesRef.current, id)]
       const starts = new Map<string, { x: number; z: number }>()
       for (const memberId of members) {
@@ -533,8 +690,8 @@ function Scene({
       if (cand && cand.connectable) {
         const targetInst = byId.get(cand.id)
         if (targetInst) {
-          // Preview: slide the grabbed piece AND everything attached below
-          // it into the connected spot while the user decides. The wires
+          // Preview: slide the grabbed piece AND everything wired below
+          // it into the connected spot while the user decides. The cables
           // only appear if the answer is "Connect".
           let dx = grabbedGroup.position.x - cand.x
           let dz = grabbedGroup.position.z - cand.z
@@ -565,12 +722,14 @@ function Scene({
             }
           }
           onDropCommit(moves, null)
-          onConnectRequest(d.id, cand.id)
+          // The parent is whichever side PROVIDES power.
+          onConnectRequest(cand.outId, cand.inId, cand.outPortId, cand.inPortId)
           return
         }
       }
 
-      // Nothing connectable nearby (or an impossible pair) — a plain drop.
+      // Nothing connectable nearby (or an impossible-in-real-life pair) —
+      // a plain drop.
       onDropCommit(moves, null)
     }
     window.addEventListener('pointerup', finish)
@@ -578,7 +737,7 @@ function Scene({
   }, [get, groups, onDropCommit, onSelect, onConnectRequest, setCandidateLive])
 
   // "Don't connect" — push the declined piece (and its subtree) back out
-  // of the preview spot so it clearly isn't attached to anything, then
+  // of the preview spot so it clearly isn't wired to anything, then
   // commit the new positions.
   const separate = useCallback(
     (childId: string, parentId: string) => {
@@ -646,7 +805,9 @@ function Scene({
       x: grabbedGroup.position.x,
       z: grabbedGroup.position.z,
     })
-    setCandidateLive(cand ? { id: cand.id, connectable: cand.connectable } : null)
+    setCandidateLive(
+      cand ? { id: cand.id, connectable: cand.connectable, reason: cand.reason } : null
+    )
   }
 
   return (
@@ -710,7 +871,7 @@ function Scene({
           inst={inst}
           running={running}
           powered={poweredIds.has(inst.id)}
-          energized={inst.kind === 'battery' && batteriesWithLoad.has(inst.id)}
+          energized={inst.kind === 'battery' && loadedBatteries.has(inst.id)}
           selected={inst.id === selectedId}
           candidate={candidate}
           groups={groups}
@@ -719,18 +880,25 @@ function Scene({
         />
       ))}
 
-      {/* Power wires for every attached link */}
+      {/* Cables for every wired link — between the REAL mated ports */}
       {instances
         .filter((i) => i.parentId)
-        .map((i) => (
-          <WirePair
-            key={`wire-${i.id}`}
-            anchors={anchors}
-            parentId={i.parentId as string}
-            childId={i.id}
-            live={running && poweredIds.has(i.id)}
-          />
-        ))}
+        .map((i) => {
+          const inPort = getPort(i.kind, i.childPort) ?? ELEC_PORTS[i.kind]?.[0]
+          return (
+            <LinkWire
+              key={`wire-${i.id}`}
+              anchors={anchors}
+              parentId={i.parentId as string}
+              parentPortId={i.parentPort ?? 'pp3'}
+              childId={i.id}
+              childPortId={i.childPort ?? inPort?.id ?? 'leads'}
+              wire={inPort?.wire ?? 'pair'}
+              live={running && poweredIds.has(i.id)}
+              spread={terminalSpread.get(i.id) ?? 0}
+            />
+          )
+        })}
 
       <OrbitControls
         makeDefault
@@ -765,10 +933,15 @@ export default function PlaygroundStage({
   poweredIds: Set<string>
   selectedId: string | null
   groups: React.RefObject<Map<string, THREE.Group>>
-  anchors: React.RefObject<Map<string, WireAnchors>>
+  anchors: React.RefObject<AnchorMap>
   onSelect: (id: string) => void
   onDropCommit: (moves: Move[], attach: Attach | null) => void
-  onConnectRequest: (childId: string, parentId: string) => void
+  onConnectRequest: (
+    parentId: string,
+    childId: string,
+    parentPortId: string,
+    childPortId: string
+  ) => void
   onCandidateChange: (candidate: LiveCandidate | null) => void
   actionsRef: React.RefObject<StageActions>
 }) {

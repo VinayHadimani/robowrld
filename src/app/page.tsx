@@ -13,6 +13,7 @@ import { ComponentView } from '@/components/simple/ComponentView'
 import { Playground } from '@/components/simple/Playground'
 import {
   PLAYGROUND_STORAGE_KEY,
+  connectBetween,
   nextSpot,
   uid,
   type Attach,
@@ -26,6 +27,7 @@ type View = { name: 'list' } | { name: 'component'; slug: string } | { name: 'pl
 
 const SERVO_SLUG = 'servo-motor'
 const BATTERY_SLUG = '9v-battery'
+const CONTROLLER_SLUG = 'arduino-uno'
 
 interface ApiComponent {
   slug: string
@@ -47,9 +49,11 @@ function toPlayComponent(c: ApiComponent): PlayComponent {
       ? 'servo'
       : c.slug === BATTERY_SLUG
         ? 'battery'
-        : c.modelKind === 'stl'
-          ? 'stl'
-          : 'gltf'
+        : c.slug === CONTROLLER_SLUG
+          ? 'controller'
+          : c.modelKind === 'stl'
+            ? 'stl'
+            : 'gltf'
   return {
     slug: c.slug,
     name: c.name,
@@ -68,10 +72,92 @@ function toPlayComponent(c: ApiComponent): PlayComponent {
 function isPlayable(c: ApiComponent): boolean {
   if (c.slug === SERVO_SLUG && c.modelKind === 'procedural') return true
   if (c.slug === BATTERY_SLUG && c.modelKind === 'procedural') return true
+  if (c.slug === CONTROLLER_SLUG && c.modelKind === 'procedural') return true
   if (c.source === 'user' && c.modelUrl && (c.modelKind === 'gltf' || c.modelKind === 'stl')) {
     return true
   }
   return false
+}
+
+/**
+ * Normalize a restored playground: every wire must satisfy TODAY's
+ * real-life connection rules. Links are re-oriented so the power
+ * provider is the parent; impossible links (e.g. an old battery→servo
+ * drop, invalid since servos take 4.8–7.2 V) are dropped, and cycles
+ * from corrupted saves are cut.
+ */
+function normalizeInstances(raw: Partial<PlayInstance>[]): PlayInstance[] {
+  const insts: PlayInstance[] = raw.map((i) => ({
+    id: String(i.id),
+    slug: String(i.slug),
+    name: String(i.name),
+    kind: (i.kind ?? 'gltf') as PlayInstance['kind'],
+    modelUrl: i.modelUrl ?? null,
+    x: Number(i.x) || 0,
+    z: Number(i.z) || 0,
+    parentId: i.parentId ?? null,
+    parentPort: i.parentPort ?? null,
+    childPort: i.childPort ?? null,
+  }))
+
+  // Drop links whose parent no longer exists.
+  for (const inst of insts) {
+    if (inst.parentId && !insts.some((o) => o.id === inst.parentId)) {
+      inst.parentId = null
+      inst.parentPort = null
+      inst.childPort = null
+    }
+  }
+
+  // Validate + orient each link (two passes so reversals settle).
+  for (let pass = 0; pass < 2; pass++) {
+    for (const inst of insts) {
+      if (!inst.parentId) continue
+      const parent = insts.find((o) => o.id === inst.parentId)
+      if (!parent) continue
+      const m = connectBetween(parent, inst)
+      if (!m.ok) {
+        // Impossible in real life — drop the wire.
+        inst.parentId = null
+        inst.parentPort = null
+        inst.childPort = null
+        continue
+      }
+      if (m.outId === parent.id) {
+        // Correct direction: the parent provides the power.
+        inst.parentPort = m.outPortId
+        inst.childPort = m.inPortId
+      } else {
+        // Stored backwards — the PROVIDER (currently the child) must
+        // become the parent.
+        inst.parentId = null
+        inst.parentPort = null
+        inst.childPort = null
+        parent.parentId = inst.id
+        parent.parentPort = m.outPortId
+        parent.childPort = m.inPortId
+      }
+    }
+  }
+
+  // Cut any remaining cycles (corrupted saves).
+  const visiting = new Set<string>()
+  const cut = (id: string) => {
+    const inst = insts.find((o) => o.id === id)
+    if (!inst || !inst.parentId) return
+    if (visiting.has(id)) {
+      inst.parentId = null
+      inst.parentPort = null
+      inst.childPort = null
+      return
+    }
+    visiting.add(id)
+    cut(inst.parentId)
+    visiting.delete(id)
+  }
+  for (const inst of insts) cut(inst.id)
+
+  return insts
 }
 
 export default function Home() {
@@ -81,23 +167,14 @@ export default function Home() {
   const [error, setError] = useState(false)
   const [loadTick, setLoadTick] = useState(0)
   // Restored during the first client render (SSR renders the list view,
-  // which doesn't depend on instances — no hydration mismatch). Older saved
-  // playgrounds predate attachments — parentId normalizes to null.
+  // which doesn't depend on instances — no hydration mismatch). Older
+  // saved playgrounds are migrated to the real-life wiring rules.
   const [instances, setInstances] = useState<PlayInstance[]>(() => {
     if (typeof window === 'undefined') return []
     try {
       const raw = localStorage.getItem(PLAYGROUND_STORAGE_KEY)
       const parsed = raw ? (JSON.parse(raw) as Partial<PlayInstance>[]) : []
-      return parsed.map((i) => ({
-        id: String(i.id),
-        slug: String(i.slug),
-        name: String(i.name),
-        kind: (i.kind ?? 'gltf') as PlayInstance['kind'],
-        modelUrl: i.modelUrl ?? null,
-        x: Number(i.x) || 0,
-        z: Number(i.z) || 0,
-        parentId: i.parentId ?? null,
-      }))
+      return normalizeInstances(parsed)
     } catch {
       return []
     }
@@ -157,6 +234,8 @@ export default function Home() {
           x: spot.x,
           z: spot.z,
           parentId: null,
+          parentPort: null,
+          childPort: null,
         },
       ]
     })
@@ -166,11 +245,24 @@ export default function Home() {
   const removeInstance = useCallback((id: string) => {
     setInstances((prev) => {
       const target = prev.find((i) => i.id === id)
-      // Removing a link in a chain splices it: children re-attach to the
-      // removed instance's own parent so the rest of the robot stays wired.
+      const grandparentId = target?.parentId ?? null
+      const grandparent = grandparentId ? prev.find((i) => i.id === grandparentId) : null
       return prev
         .filter((i) => i.id !== id)
-        .map((i) => (i.parentId === id ? { ...i, parentId: target?.parentId ?? null } : i))
+        .map((i) => {
+          if (i.parentId !== id) return i
+          // Removing a link in a chain splices it: children re-attach to
+          // the removed component's own provider — but ONLY when that
+          // grandparent can really power them (a servo orphaned by its
+          // controller cannot re-wire to the 9V battery).
+          if (grandparent) {
+            const m = connectBetween(grandparent, i)
+            if (m.ok && m.outId === grandparent.id) {
+              return { ...i, parentId: grandparent.id, parentPort: m.outPortId, childPort: m.inPortId }
+            }
+          }
+          return { ...i, parentId: null, parentPort: null, childPort: null }
+        })
     })
   }, [])
 
@@ -181,22 +273,35 @@ export default function Home() {
       return prev.map((i) => {
         const m = byMove.get(i.id)
         if (!m) return i
-        const parent =
-          attach && attach.childId === i.id ? attach.parentId : i.parentId
-        return { ...i, x: m.x, z: m.z, parentId: parent }
+        const parent = attach && attach.childId === i.id ? attach.parentId : i.parentId
+        const parentPort =
+          attach && attach.childId === i.id ? attach.parentPort : i.parentPort
+        const childPort = attach && attach.childId === i.id ? attach.childPort : i.childPort
+        return { ...i, x: m.x, z: m.z, parentId: parent, parentPort, childPort }
       })
     })
   }, [])
 
   /** Wire two components together — runs only after the user grants
-      permission in the connection prompt. */
-  const attachInstance = useCallback((childId: string, parentId: string) => {
-    setInstances((prev) => prev.map((i) => (i.id === childId ? { ...i, parentId } : i)))
-  }, [])
+      permission in the connection prompt. The parent provides power. */
+  const attachInstance = useCallback(
+    (childId: string, parentId: string, parentPort: string, childPort: string) => {
+      setInstances((prev) =>
+        prev.map((i) =>
+          i.id === childId ? { ...i, parentId, parentPort, childPort } : i
+        )
+      )
+    },
+    []
+  )
 
-  /** Cut one component loose from its parent (it stays where it is). */
+  /** Cut one component loose from its power provider (it stays put). */
   const detachInstance = useCallback((id: string) => {
-    setInstances((prev) => prev.map((i) => (i.id === id ? { ...i, parentId: null } : i)))
+    setInstances((prev) =>
+      prev.map((i) =>
+        i.id === id ? { ...i, parentId: null, parentPort: null, childPort: null } : i
+      )
+    )
   }, [])
 
   const clearInstances = useCallback(() => setInstances([]), [])

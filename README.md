@@ -9,8 +9,10 @@ Built with **Next.js 16 + React Three Fiber**, backed by **Supabase** (Postgres 
 - **Component library** — a plain list of component names (servo motor, 9V battery, motors, uploaded models…). Click one to open its detail page.
 - **Detail view** — an interactive 3D model of the real machine plus a short description and a few key specs, and one button: **Add to Playground**.
 - **Playground** — the building surface. Add any component, drag it around the floor, and assemble your robot.
-- **Permission-based connections** — drag a component near another and the app asks before connecting anything. A pulsing ring shows what you're hovering: green = connectable, red = not (batteries power components, they don't chain onto each other). Release, confirm the dialog, and the two are wired together with red/black power cables.
-- **Power gating** — components **never run on their own**. Servos only sweep, motors only spin, LEDs only light when a wire path leads back to a **9V battery** (directly or through a chain). Press Run with nothing connected and everything stays perfectly still.
+- **Real-life connections** — parts only connect if their real connectors and voltages match, and the app explains why when they don't. A 9V battery snaps onto a motor's power leads (3–12 V) and the Arduino's VIN jack (7–12 V); a servo's 3-pin lead (4.8–7.2 V) plugs into the Arduino's 5 V pin header — never straight onto the 9V snap. Two power sources can't power each other; two consumers can't power each other either.
+- **Permission-based connections** — drag a component near another and the app asks before wiring anything. A pulsing ring shows what you're hovering: green = compatible, red = not (with the reason in the toolbar — e.g. "9 V is outside the 4.8–7.2 V Servo Motor accepts… power it through a controller"). Release, confirm the dialog, and the two are wired between their actual connectors.
+- **Visible wiring** — every connection renders as a real cable between the mated ports: a red + black pair from the battery's brass +/− snap terminals to each consumer (fanning out side by side when one battery feeds several things), and an orange/red/brown 3-wire ribbon from the Arduino's header to a servo.
+- **Power gating** — components **never run on their own**. Nothing animates unless a valid wire path leads back to a **9V battery**: battery → motor (spins), battery → Arduino → servo (sweeps). Cut any link and everything downstream freezes.
 - **Persistence** — your playground layout and connections persist in the browser (localStorage); the component catalog persists in Supabase.
 
 ## Quick start
@@ -84,9 +86,11 @@ scripts/
 
 ## Core mechanics
 
-- **Connectability** (`areConnectable`): every pair is connectable except battery ↔ battery.
-- **Power graph** (`poweredIds`): undirected reachability from any 9V battery across parent/child links — a component runs iff it's in a group that contains a battery.
-- **Connection flow**: proximity ring → release → preview snap → permission dialog → confirm wires + power flows / decline pushes the piece back out.
+- **Electrical ports** (`ELEC_PORTS` in `src/lib/playground.ts`): every component kind declares real ports — the 9V battery's snap terminals (out, 9 V), the Arduino's VIN jack (in, 7–12 V) + 5 V pin header (out), a servo's 3-pin signal lead (in, 4.8–7.2 V), generic power leads on uploaded models (in, 3–12 V).
+- **Real-life mating** (`connectBetween`): a connection exists iff one side provides power at a voltage the other accepts. Battery → motor ✓, battery → Arduino ✓, Arduino → servo ✓, battery → servo ✗ (over-voltage), source ↔ source ✗, consumer ↔ consumer ✗ — each refusal carries a human-readable reason.
+- **Power graph** (`poweredIds`): directed voltage-checked propagation from the batteries through the parent/provider chain (the Arduino passes its VIN power through as 5 V on its header) — a component runs iff it has a valid path to a battery.
+- **Connection flow**: proximity ring (green/red + reason) → release → preview snap → permission dialog naming the actual ports → confirm wires the real connectors + power flows / decline pushes the piece back out.
+- **Persistence**: the playground (positions, links, mated ports) survives reloads; old saves are migrated to the new rules — impossible links are dropped, reversed links re-oriented so the provider is the parent.
 
 ## Notes
 

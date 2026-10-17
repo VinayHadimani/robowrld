@@ -669,6 +669,84 @@ export const BATTERY_9V: RoboticsComponent = {
   },
 }
 
+/**
+ * The controller board (Arduino Uno R3 class). The real-life bridge of
+ * every student robot: the 9V battery wires into its VIN jack, and its
+ * 5 V pin header feeds servos and small motors through 3-wire signal
+ * cables. Without it, nothing that needs a signal or 5 V logic can run.
+ */
+export const CONTROLLER: RoboticsComponent = {
+  id: 'arduino-uno',
+  name: 'Arduino Uno',
+  category: 'Controller',
+  status: 'available',
+  tagline: 'The 5 V heartbeat of a robot — takes 9 V in on VIN, feeds servos and sensors out.',
+  description:
+    'The Arduino Uno is a microcontroller board based on the ATmega328P: 14 digital I/O pins (6 of them PWM outputs for servos), 6 analog inputs, a 16 MHz clock and a USB port for programming. In a real robot it sits between the battery and everything else — the 9 V battery wires into its VIN jack (7–12 V), its onboard regulator drops that to a clean 5 V, and its pin headers then power and command servos, motors and sensors. In this library it plays exactly that role: a component only connects when voltage and connector match; a servo takes 4.8–7.2 V on a 3-pin lead, so it plugs into the Uno — never straight onto a 9 V snap.',
+  specs: [
+    { label: 'Microcontroller', value: 'ATmega328P · 16 MHz' },
+    { label: 'Digital I/O', value: '14 pins (6 PWM) + 6 analog in' },
+    { label: 'Input (VIN jack)', value: '7–12 V DC' },
+    { label: 'Logic / output', value: '5 V · ~500 mA for peripherals' },
+    { label: 'Dimensions', value: '68.6 × 53.4 mm' },
+    { label: 'Weight', value: '~25 g' },
+  ],
+  physics: {
+    mass: 25,
+    dimensions: { l: 68.6, w: 53.4, h: 15 },
+    materials: [
+      { part: 'PCB', material: 'FR4, teal solder mask' },
+      { part: 'Headers', material: 'Black plastic + gold-plated pins' },
+      { part: 'Connectors', material: 'Tin-plated steel (USB-B, barrel jack)' },
+    ],
+    electrical: [
+      { label: 'VIN range', value: '7–12 V (reverse-polarity protected)' },
+      { label: '5 V rail', value: '~500 mA shared by headers' },
+      { label: 'Logic level', value: '5 V TTL' },
+      { label: 'Idle draw', value: '~45–50 mA' },
+    ],
+    mechanical: [
+      { label: 'Mounting', value: '4 × 3.2 mm holes' },
+      { label: 'Connectors', value: 'USB-B, 2.1 mm barrel jack' },
+    ],
+    simNotes:
+      'The power broker of the graph: accepts 7–12 V on VIN, provides a regulated 5 V on its headers while powered. A servo wired here runs from the 5 V rail, NOT from the raw battery — voltage compatibility is enforced at every link, exactly like the real part.',
+  },
+  commerce: {
+    manufacturer: 'Arduino (and compatible clones)',
+    partNumber: 'A000066 / UNO R3',
+    priceUsd: [6, 25],
+    priceInr: [500, 2200],
+    availability: 'Every robotics shop; clones from ₹500',
+    vendors: ['Amazon', 'Robu.in', 'Arduino Store', 'Local electronics markets'],
+  },
+  ai: {
+    summary: 'ATmega328P microcontroller board — regulates 9 V VIN down to a 5 V rail that powers and commands servos and sensors.',
+    capabilities: [
+      'Regulates 7–12 V VIN into a clean 5 V rail for peripherals',
+      'Drives a couple of servos from its headers (PWM)',
+      'Reads sensors on analog and digital pins',
+      'The bridge every signal-dependent component plugs into',
+    ],
+    constraints: [
+      '5 V rail is ~500 mA shared — not for stalled motors',
+      'Servos draw through the board, never straight from the battery',
+      'Needs 7 V minimum on VIN — a 5 V feed will not run it',
+    ],
+    bestFor: [
+      'Standing between a 9V battery and servos/sensors',
+      'Any robot that needs more than raw motor power',
+      'Teaching why voltage compatibility matters',
+    ],
+  },
+  model: {
+    kind: 'procedural',
+    component: 'ArduinoUno',
+    dimensionAccurate: true,
+    note: 'Parametric Uno R3 geometry — teal PCB, black headers with gold pins, USB-B, barrel jack, ATmega chip and an ON LED that lights while the board is powered.',
+  },
+}
+
 /* ------------------------------------------------------------------ */
 /* The catalog                                                         */
 /* ------------------------------------------------------------------ */
@@ -676,6 +754,7 @@ export const BATTERY_9V: RoboticsComponent = {
 export const COMPONENTS: RoboticsComponent[] = [
   SERVO,
   BATTERY_9V,
+  CONTROLLER,
   DC_MOTOR,
   STEPPER_MOTOR,
   ULTRASONIC_SENSOR,

@@ -7,6 +7,7 @@ import { firstSentences, formatBytes, type PlayComponent } from '@/lib/playgroun
 
 const ServoStage = dynamic(() => import('@/components/three/ServoStage'), { ssr: false })
 const BatteryStage = dynamic(() => import('@/components/three/BatteryStage'), { ssr: false })
+const BoardStage = dynamic(() => import('@/components/three/BoardStage'), { ssr: false })
 const ModelStage = dynamic(() => import('@/components/three/ModelStage'), { ssr: false })
 
 /**
@@ -43,6 +44,8 @@ export function ComponentView({
               <ServoStage interactive showCable />
             ) : c.kind === 'battery' ? (
               <BatteryStage />
+            ) : c.kind === 'controller' ? (
+              <BoardStage />
             ) : c.modelUrl ? (
               <ModelStage url={c.modelUrl} kind={c.kind} autoRotate />
             ) : null}
@@ -51,8 +54,10 @@ export function ComponentView({
             {c.kind === 'servo'
               ? 'Drag the horn — it steers like the real thing.'
               : c.kind === 'battery'
-                ? 'Connect it to components in the playground to power them.'
-                : 'Drag to orbit · scroll to zoom.'}
+                ? 'Wire it to components in the playground to power them.'
+                : c.kind === 'controller'
+                  ? 'Wire the 9V battery into its VIN jack — its 5 V pins then power servos.'
+                  : 'Drag to orbit · scroll to zoom.'}
           </p>
         </div>
 
@@ -80,7 +85,7 @@ export function ComponentView({
             </dl>
           )}
 
-          {c.kind !== 'servo' && c.kind !== 'battery' && (
+          {c.kind !== 'servo' && c.kind !== 'battery' && c.kind !== 'controller' && (
             <dl className="text-sm">
               <div className="flex items-baseline justify-between gap-4 border-b py-1.5">
                 <dt className="shrink-0 text-muted-foreground">Format</dt>
