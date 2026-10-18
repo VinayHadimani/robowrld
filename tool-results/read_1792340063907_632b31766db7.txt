@@ -1,0 +1,677 @@
+     1→'use client'
+     2→
+     3→/**
+     4→ * ServoMotor — a self-contained, reusable 3D replica of a real-world hobby
+     5→ * servo motor (SG90 / MG996R class), modeled entirely from procedural
+     6→ * Three.js geometry (no external model files).
+     7→ *
+     8→ * Anatomy replicated from the real part:
+     9→ *  - Injection-molded case with chamfered edges and a bottom cap
+    10→ *  - Round top boss with a splined brass output shaft (the shaft rotates)
+    11→ *  - Horn / output arm mounted on the shaft, secured by a center screw
+    12→ *  - Twin mounting tabs with two M3 mounting holes each
+    13→ *  - Rear grommet, 3-wire lead (brown / red / orange) and 3-pin connector
+    14→ *
+    15→ * Reusability:
+    16→ *  <ServoMotor angle={90} speed={400} hornType="single" interactive />
+    17→ *
+    18→ * The horn always rotates toward the commanded `angle` at `speed` degrees per
+    19→ * second — just like a real servo tracking a PWM command — so it animates
+    20→ * smoothly even when the prop jumps.
+    21→ */
+    22→
+    23→import { useCallback, useEffect, useMemo, useRef } from 'react'
+    24→import * as THREE from 'three'
+    25→import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber'
+    26→import { RoundedBox, Html } from '@react-three/drei'
+    27→import { SERVO_PORTS, type Port } from '@/lib/connections'
+    28→
+    29→/* ------------------------------------------------------------------ */
+    30→/* Public API                                                          */
+    31→/* ------------------------------------------------------------------ */
+    32→
+    33→export type HornType = 'single' | 'double' | 'round'
+    34→
+    35→export interface ServoMotorProps {
+    36→  /** Commanded angle in degrees (0–180). The horn moves toward it at `speed`. */
+    37→  angle?: number
+    38→  /** Maximum travel speed in degrees/second (a real MG996R does ~350 °/s). */
+    39→  speed?: number
+    40→  /** Case + boss color (CSS color string). */
+    41→  bodyColor?: string
+    42→  /** Horn (arm) color. */
+    43→  hornColor?: string
+    44→  /** Horn style: "single" arm, "double" arm or "round" disc. */
+    45→  hornType?: HornType
+    46→  /** Render the horn on the output shaft. */
+    47→  showHorn?: boolean
+    48→  /** Render the 3-wire cable and connector. */
+    49→  showCable?: boolean
+    50→  /** Render floating part labels. */
+    51→  showLabels?: boolean
+    52→  /** Render the connection-port markers + range arc (assembly view). */
+    53→  showPorts?: boolean
+    54→  /** Allow grabbing the horn/shaft and dragging it to steer the servo. */
+    55→  interactive?: boolean
+    56→  /** Radius of the invisible grab volume around the shaft (for rigs with a crank). */
+    57→  grabRadius?: number
+    58→  /** Height of the grab volume's center (for rigged cranks). */
+    59→  grabY?: number
+    60→  /** Self-contained sweep animation — handy for list previews. */
+    61→  autoSweep?: { min: number; max: number; speed: number } | false
+    62→  /** Fires while the user drags the horn (the new commanded angle). */
+    63→  onAngleChange?: (angle: number) => void
+    64→  /** Fires when horn dragging starts / ends. */
+    65→  onDragStateChange?: (dragging: boolean) => void
+    66→  /** The component writes its true (speed-limited) shaft angle here every
+    67→   *  frame — this is how attached mechanisms stay in sync without re-renders. */
+    68→  liveAngleRef?: { current: number }
+    69→  scale?: number
+    70→  position?: [number, number, number]
+    71→  rotation?: [number, number, number]
+    72→}
+    73→
+    74→/* ------------------------------------------------------------------ */
+    75→/* Default palette (matches a classic hobby servo)                     */
+    76→/* ------------------------------------------------------------------ */
+    77→
+    78→const DEFAULT_BODY = '#1c56b2'
+    79→const DEFAULT_HORN = '#efe8d8'
+    80→
+    81→/* ------------------------------------------------------------------ */
+    82→/* Geometry helpers                                                    */
+    83→/* ------------------------------------------------------------------ */
+    84→
+    85→/** Rounded-rectangle outline centered at (cx, cy). */
+    86→export function roundedRectShape(w: number, h: number, r: number, cx = 0, cy = 0): THREE.Shape {
+    87→  const s = new THREE.Shape()
+    88→  const x0 = cx - w / 2
+    89→  const y0 = cy - h / 2
+    90→  const x1 = cx + w / 2
+    91→  const y1 = cy + h / 2
+    92→  s.moveTo(x0 + r, y0)
+    93→  s.lineTo(x1 - r, y0)
+    94→  s.quadraticCurveTo(x1, y0, x1, y0 + r)
+    95→  s.lineTo(x1, y1 - r)
+    96→  s.quadraticCurveTo(x1, y1, x1 - r, y1)
+    97→  s.lineTo(x0 + r, y1)
+    98→  s.quadraticCurveTo(x0, y1, x0, y1 - r)
+    99→  s.lineTo(x0, y0 + r)
+   100→  s.quadraticCurveTo(x0, y0, x0 + r, y0)
+   101→  return s
+   102→}
+   103→
+   104→/** Circular hole path for extruded shapes. */
+   105→export function circleHole(x: number, y: number, r: number): THREE.Path {
+   106→  const p = new THREE.Path()
+   107→  p.absarc(x, y, r, 0, Math.PI * 2, true)
+   108→  return p
+   109→}
+   110→
+   111→/**
+   112→ * Extrude a shape lying flat in the XZ plane (thickness along +Y),
+   113→ * with a tiny bevel for an injection-molded look.
+   114→ */
+   115→export function extrudeFlat(shape: THREE.Shape, thickness: number, bevel = 0.025): THREE.ExtrudeGeometry {
+   116→  const g = new THREE.ExtrudeGeometry(shape, {
+   117→    depth: Math.max(thickness - bevel * 2, 0.01),
+   118→    bevelEnabled: bevel > 0,
+   119→    bevelThickness: bevel,
+   120→    bevelSize: bevel,
+   121→    bevelSegments: 2,
+   122→    curveSegments: 22,
+   123→  })
+   124→  g.rotateX(-Math.PI / 2)
+   125→  g.translate(0, bevel, 0)
+   126→  return g
+   127→}
+   128→
+   129→/** Smooth tube along a Catmull-Rom curve — used for the cable. */
+   130→function cableTube(points: Array<[number, number, number]>, radius: number, segments = 56): THREE.TubeGeometry {
+   131→  const curve = new THREE.CatmullRomCurve3(points.map((p) => new THREE.Vector3(...p)))
+   132→  return new THREE.TubeGeometry(curve, segments, radius, 10, false)
+   133→}
+   134→
+   135→/* ------------------------------------------------------------------ */
+   136→/* Static part data                                                    */
+   137→/* ------------------------------------------------------------------ */
+   138→
+   139→const PART_LABELS: Array<{ position: [number, number, number]; text: string }> = [
+   140→  { position: [1.95, 5.42, 0.35], text: 'Horn (output arm)' },
+   141→  { position: [0.72, 4.82, 0.38], text: 'Splined output shaft' },
+   142→  { position: [3.42, 2.98, 0.42], text: 'Mounting tab · M3 holes' },
+   143→  { position: [1.62, 2.32, 1.32], text: 'Case (nylon)' },
+   144→  { position: [-4.55, 1.62, 0.42], text: '3-wire lead' },
+   145→  { position: [-7.85, 0.42, 0.62], text: '3-pin connector' },
+   146→]
+   147→
+   148→const TOP_SCREWS: Array<[number, number]> = [
+   149→  [-1.72, 0.92],
+   150→  [-1.72, -0.92],
+   151→]
+   152→
+   153→const BOTTOM_SCREWS: Array<[number, number]> = [
+   154→  [1.85, 0.72],
+   155→  [1.85, -0.72],
+   156→  [-1.85, 0.72],
+   157→  [-1.85, -0.72],
+   158→]
+   159→
+   160→const CONNECTOR_PINS: number[] = [-0.28, 0, 0.28]
+   161→
+   162→/* ------------------------------------------------------------------ */
+   163→/* Port markers (rendered from the connection contract data)          */
+   164→/* ------------------------------------------------------------------ */
+   165→
+   166→const PORT_RING_R: Record<Port['kind'], number> = {
+   167→  'bolt-hole': 0.32,
+   168→  'spline-shaft': 0.62,
+   169→  face: 1.7,
+   170→  'pin-socket': 0.42,
+   171→}
+   172→
+   173→function PortMarkers() {
+   174→  return (
+   175→    <group>
+   176→      {SERVO_PORTS.map((p) => {
+   177→        const ringR = PORT_RING_R[p.kind]
+   178→        const flat = p.kind !== 'pin-socket'
+   179→        return (
+   180→          <group key={p.id} position={p.position}>
+   181→            {/* Ring aligned with the port axis */}
+   182→            <mesh rotation={flat ? [-Math.PI / 2, 0, 0] : [0, 0, Math.PI / 2]}>
+   183→              <torusGeometry args={[ringR, 0.045, 10, 40]} />
+   184→              <meshBasicMaterial color="#f59e0b" toneMapped={false} />
+   185→            </mesh>
+   186→            {/* Center dot */}
+   187→            <mesh>
+   188→              <sphereGeometry args={[0.09, 14, 14]} />
+   189→              <meshBasicMaterial color="#f59e0b" toneMapped={false} />
+   190→            </mesh>
+   191→            <Html
+   192→              position={(p.labelOffset ?? [0, 0.5, 0]) as [number, number, number]}
+   193→              center
+   194→              distanceFactor={13}
+   195→              occlude
+   196→              zIndexRange={[30, 0]}
+   197→            >
+   198→              <div className="pointer-events-none flex select-none items-center gap-1.5 whitespace-nowrap">
+   199→                <span className="h-1.5 w-1.5 rounded-full bg-amber-500 ring-2 ring-white" />
+   200→                <span className="rounded-full border border-amber-300 bg-amber-50/95 px-2.5 py-1 font-mono text-[11px] font-semibold text-amber-800 shadow-sm">
+   201→                  {p.id.toUpperCase()} · {p.spec}
+   202→                </span>
+   203→              </div>
+   204→            </Html>
+   205→          </group>
+   206→        )
+   207→      })}
+   208→
+   209→      {/* DOF range arc: 0° → 180° around the shaft */}
+   210→      <group position={[0, 4.62, 0]}>
+   211→        <mesh rotation={[Math.PI / 2, 0, 0]}>
+   212→          <torusGeometry args={[3.6, 0.028, 8, 72, Math.PI]} />
+   213→          <meshBasicMaterial color="#f59e0b" transparent opacity={0.75} toneMapped={false} />
+   214→        </mesh>
+   215→        {[0, 90, 180].map((deg) => (
+   216→          <mesh
+   217→            key={deg}
+   218→            position={[3.6 * Math.cos((deg * Math.PI) / 180), 0, 3.6 * Math.sin((deg * Math.PI) / 180)]}
+   219→          >
+   220→            <sphereGeometry args={[0.075, 12, 12]} />
+   221→            <meshBasicMaterial color="#f59e0b" toneMapped={false} />
+   222→          </mesh>
+   223→        ))}
+   224→      </group>
+   225→    </group>
+   226→  )
+   227→}
+   228→
+   229→/* ------------------------------------------------------------------ */
+   230→/* The component                                                       */
+   231→/* ------------------------------------------------------------------ */
+   232→
+   233→export function ServoMotor({
+   234→  angle = 90,
+   235→  speed = 400,
+   236→  bodyColor = DEFAULT_BODY,
+   237→  hornColor = DEFAULT_HORN,
+   238→  hornType = 'single',
+   239→  showHorn = true,
+   240→  showCable = true,
+   241→  showLabels = false,
+   242→  showPorts = false,
+   243→  interactive = false,
+   244→  grabRadius = 1.06,
+   245→  grabY = 5.32,
+   246→  autoSweep = false,
+   247→  onAngleChange,
+   248→  onDragStateChange,
+   249→  liveAngleRef,
+   250→  scale = 1,
+   251→  position = [0, 0, 0],
+   252→  rotation = [0, 0, 0],
+   253→}: ServoMotorProps) {
+   254→  const root = useRef<THREE.Group>(null!)
+   255→  const rotor = useRef<THREE.Group>(null!)
+   256→
+   257→  // Motion state (kept in refs — zero React re-renders while animating)
+   258→  const target = useRef(angle)
+   259→  const current = useRef(angle)
+   260→  const sweepDir = useRef(1)
+   261→  const dragging = useRef(false)
+   262→
+   263→  // Drag machinery
+   264→  const { camera, gl, get } = useThree()
+   265→  const hover = useRef(false)
+   266→  const canvasEl = useRef<HTMLCanvasElement | null>(null)
+   267→  const listeners = useRef<{ move: (e: PointerEvent) => void; up: () => void } | null>(null)
+   268→
+   269→  // Latest-prop mirrors so stable drag handlers always see fresh callbacks
+   270→  const latest = useRef({ onAngleChange, onDragStateChange, interactive })
+   271→  useEffect(() => {
+   272→    latest.current = { onAngleChange, onDragStateChange, interactive }
+   273→  })
+   274→
+   275→  /* ---------------- geometry (built once, disposed on unmount) ------- */
+   276→
+   277→  const geo = useMemo(() => {
+   278→    // Mounting tab: rounded bar with two M3 clearance holes
+   279→    const tab = roundedRectShape(1.34, 2.5, 0.32)
+   280→    tab.holes.push(circleHole(-0.3, 0, 0.27), circleHole(0.3, 0, 0.27))
+   281→
+   282→    // Single/double horn arm with lightening holes
+   283→    const arm = roundedRectShape(2.58, 0.66, 0.33, 1.61, 0)
+   284→    arm.holes.push(circleHole(1.0, 0, 0.11), circleHole(1.66, 0, 0.11), circleHole(2.32, 0, 0.11))
+   285→
+   286→    // Round horn: disc with a ring of holes
+   287→    const disc = new THREE.Shape()
+   288→    disc.absarc(0, 0, 1.42, 0, Math.PI * 2, false)
+   289→    for (let i = 0; i < 6; i++) {
+   290→      const a = (i / 6) * Math.PI * 2
+   291→      disc.holes.push(circleHole(Math.cos(a) * 1.05, Math.sin(a) * 1.05, 0.13))
+   292→    }
+   293→
+   294→    return {
+   295→      tab: extrudeFlat(tab, 0.24),
+   296→      arm: extrudeFlat(arm, 0.26),
+   297→      disc: extrudeFlat(disc, 0.22),
+   298→      sheath: cableTube(
+   299→        [
+   300→          [-2.45, 1.6, 0],
+   301→          [-3.2, 1.55, 0],
+   302→          [-4.2, 1.15, 0],
+   303→          [-5.0, 0.5, 0],
+   304→          [-5.45, 0.12, 0],
+   305→        ],
+   306→        0.33
+   307→      ),
+   308→      wireBrown: cableTube(
+   309→        [
+   310→          [-5.45, 0.12, -0.04],
+   311→          [-5.9, -0.14, -0.2],
+   312→          [-6.4, -0.34, -0.28],
+   313→          [-7.32, -0.34, -0.28],
+   314→        ],
+   315→        0.15
+   316→      ),
+   317→      wireRed: cableTube(
+   318→        [
+   319→          [-5.45, 0.12, 0],
+   320→          [-5.95, -0.12, 0],
+   321→          [-6.5, -0.34, 0],
+   322→          [-7.42, -0.34, 0],
+   323→        ],
+   324→        0.15
+   325→      ),
+   326→      wireOrange: cableTube(
+   327→        [
+   328→          [-5.45, 0.12, 0.04],
+   329→          [-5.9, -0.14, 0.2],
+   330→          [-6.4, -0.34, 0.28],
+   331→          [-7.32, -0.34, 0.28],
+   332→        ],
+   333→        0.15
+   334→      ),
+   335→    }
+   336→  }, [])
+   337→
+   338→  /* ---------------- materials (shared instances) -------------------- */
+   339→
+   340→  const mats = useMemo(() => {
+   341→    return {
+   342→      body: new THREE.MeshPhysicalMaterial({
+   343→        color: new THREE.Color(DEFAULT_BODY),
+   344→        roughness: 0.38,
+   345→        metalness: 0.05,
+   346→        clearcoat: 0.55,
+   347→        clearcoatRoughness: 0.35,
+   348→      }),
+   349→      trim: new THREE.MeshStandardMaterial({ color: '#26272c', roughness: 0.55, metalness: 0.15 }),
+   350→      horn: new THREE.MeshStandardMaterial({ color: new THREE.Color(DEFAULT_HORN), roughness: 0.4, metalness: 0.02 }),
+   351→      brass: new THREE.MeshStandardMaterial({
+   352→        color: '#d0a84f',
+   353→        metalness: 0.95,
+   354→        roughness: 0.3,
+   355→        flatShading: true, // faceted cylinder reads as a splined shaft
+   356→      }),
+   357→      steel: new THREE.MeshStandardMaterial({ color: '#cfd4dc', metalness: 0.9, roughness: 0.35 }),
+   358→      pin: new THREE.MeshStandardMaterial({ color: '#e0b45c', metalness: 1, roughness: 0.25 }),
+   359→      sheath: new THREE.MeshStandardMaterial({ color: '#202228', roughness: 0.7, metalness: 0.05 }),
+   360→      brown: new THREE.MeshStandardMaterial({ color: '#5d3a21', roughness: 0.65 }),
+   361→      red: new THREE.MeshStandardMaterial({ color: '#c33131', roughness: 0.65 }),
+   362→      orange: new THREE.MeshStandardMaterial({ color: '#f0801e', roughness: 0.65 }),
+   363→      label: new THREE.MeshStandardMaterial({ color: '#f4f1e8', roughness: 0.5 }),
+   364→      ink: new THREE.MeshStandardMaterial({ color: '#23262c', roughness: 0.6 }),
+   365→      grab: new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }),
+   366→    }
+   367→  }, [])
+   368→
+   369→  useEffect(() => {
+   370→    mats.body.color.set(bodyColor)
+   371→    mats.horn.color.set(hornColor)
+   372→  }, [bodyColor, hornColor, mats])
+   373→
+   374→  useEffect(() => {
+   375→    return () => {
+   376→      Object.values(geo).forEach((g) => g.dispose())
+   377→      Object.values(mats).forEach((m) => m.dispose())
+   378→    }
+   379→  }, [geo, mats])
+   380→
+   381→  /* ---------------- prop → target sync ------------------------------ */
+   382→
+   383→  useEffect(() => {
+   384→    if (!dragging.current) target.current = angle
+   385→  }, [angle])
+   386→
+   387→  /* ---------------- per-frame motion -------------------------------- */
+   388→
+   389→  useFrame((_, rawDt) => {
+   390→    const dt = Math.min(rawDt, 0.05)
+   391→
+   392→    if (autoSweep && !dragging.current) {
+   393→      target.current += sweepDir.current * autoSweep.speed * dt
+   394→      if (target.current >= autoSweep.max) {
+   395→        target.current = autoSweep.max
+   396→        sweepDir.current = -1
+   397→      } else if (target.current <= autoSweep.min) {
+   398→        target.current = autoSweep.min
+   399→        sweepDir.current = 1
+   400→      }
+   401→    }
+   402→
+   403→    // Speed-limited travel toward the commanded angle (like a real servo)
+   404→    const diff = target.current - current.current
+   405→    if (Math.abs(diff) < 0.05) {
+   406→      current.current = target.current
+   407→    } else {
+   408→      const maxStep = speed * dt
+   409→      current.current += THREE.MathUtils.clamp(diff, -maxStep, maxStep)
+   410→    }
+   411→
+   412→    if (rotor.current) {
+   413→      rotor.current.rotation.y = -THREE.MathUtils.degToRad(current.current)
+   414→    }
+   415→
+   416→    // Publish the true shaft angle to any attached mechanism (zero re-renders)
+   417→    if (liveAngleRef) liveAngleRef.current = current.current
+   418→  })
+   419→
+   420→  /* ---------------- drag-to-rotate the horn ------------------------- */
+   421→
+   422→  /** Project a pointer position onto the horn plane and read the servo angle. */
+   423→  const shaftScreenPos = useCallback((): { x: number; y: number; sign: number } | null => {
+   424→    if (!root.current) return null
+   425→    const rect = gl.domElement.getBoundingClientRect()
+   426→    if (!rect.width || !rect.height) return null
+   427→    root.current.updateWorldMatrix(true, false)
+   428→    const shaftWorld = root.current.localToWorld(new THREE.Vector3(0, 5.0, 0))
+   429→    const ndcPoint = shaftWorld.clone().project(camera)
+   430→    return {
+   431→      x: ((ndcPoint.x + 1) / 2) * rect.width + rect.left,
+   432→      y: ((1 - ndcPoint.y) / 2) * rect.height + rect.top,
+   433→      // Viewing the rotation plane from above keeps direction; from below flips it
+   434→      sign: camera.position.y > shaftWorld.y ? 1 : -1,
+   435→    }
+   436→  }, [camera, gl])
+   437→
+   438→  const setControlsEnabled = useCallback(
+   439→    (enabled: boolean) => {
+   440→      const controls = get().controls as { enabled?: boolean } | null
+   441→      if (controls) controls.enabled = enabled
+   442→    },
+   443→    [get]
+   444→  )
+   445→
+   446→  const endDrag = useCallback(() => {
+   447→    if (listeners.current) {
+   448→      window.removeEventListener('pointermove', listeners.current.move)
+   449→      window.removeEventListener('pointerup', listeners.current.up)
+   450→      listeners.current = null
+   451→    }
+   452→    dragging.current = false
+   453→    setControlsEnabled(true)
+   454→    if (canvasEl.current) canvasEl.current.style.cursor = hover.current ? 'grab' : ''
+   455→    latest.current.onDragStateChange?.(false)
+   456→  }, [setControlsEnabled])
+   457→
+   458→  const beginDrag = useCallback(
+   459→    (e: ThreeEvent<PointerEvent>) => {
+   460→      if (!latest.current.interactive) return
+   461→      e.stopPropagation()
+   462→      e.nativeEvent.preventDefault?.()
+   463→
+   464→      // Freeze orbit controls while steering the horn
+   465→      setControlsEnabled(false)
+   466→
+   467→      // Screen-space "knob": track the pointer angle around the projected shaft
+   468→      const screen = shaftScreenPos()
+   469→      if (!screen) {
+   470→        setControlsEnabled(true)
+   471→        return
+   472→      }
+   473→      const startAlpha = Math.atan2(e.nativeEvent.clientY - screen.y, e.nativeEvent.clientX - screen.x)
+   474→
+   475→      dragging.current = true
+   476→      canvasEl.current = e.nativeEvent.target as HTMLCanvasElement
+   477→      canvasEl.current.style.cursor = 'grabbing'
+   478→      latest.current.onDragStateChange?.(true)
+   479→
+   480→      let prevAlpha = startAlpha
+   481→      const move = (ev: PointerEvent) => {
+   482→        const alpha = Math.atan2(ev.clientY - screen.y, ev.clientX - screen.x)
+   483→        // Wrap the delta to (-π, π] so crossing the ±180° seam stays smooth
+   484→        let d = alpha - prevAlpha
+   485→        d = Math.atan2(Math.sin(d), Math.cos(d))
+   486→        prevAlpha = alpha
+   487→        const next = THREE.MathUtils.clamp(target.current + screen.sign * THREE.MathUtils.radToDeg(d), 0, 180)
+   488→        target.current = next
+   489→        latest.current.onAngleChange?.(next)
+   490→      }
+   491→      const up = () => endDrag()
+   492→      listeners.current = { move, up }
+   493→      window.addEventListener('pointermove', move)
+   494→      window.addEventListener('pointerup', up)
+   495→    },
+   496→    [endDrag, setControlsEnabled, shaftScreenPos]
+   497→  )
+   498→
+   499→  // Safety: release listeners if the component unmounts mid-drag
+   500→  useEffect(() => {
+   501→    return () => {
+   502→      if (listeners.current) {
+   503→        window.removeEventListener('pointermove', listeners.current.move)
+   504→        window.removeEventListener('pointerup', listeners.current.up)
+   505→        listeners.current = null
+   506→      }
+   507→    }
+   508→  }, [])
+   509→
+   510→  const onRotorOver = useCallback(
+   511→    (e: ThreeEvent<PointerEvent>) => {
+   512→      if (!latest.current.interactive) return
+   513→      e.stopPropagation()
+   514→      hover.current = true
+   515→      if (!dragging.current) {
+   516→        const el = e.nativeEvent.target as HTMLElement | null
+   517→        if (el) el.style.cursor = 'grab'
+   518→      }
+   519→    },
+   520→    []
+   521→  )
+   522→
+   523→  const onRotorOut = useCallback(
+   524→    (e: ThreeEvent<PointerEvent>) => {
+   525→      hover.current = false
+   526→      if (!dragging.current) {
+   527→        const el = e.nativeEvent.target as HTMLElement | null
+   528→        if (el) el.style.cursor = ''
+   529→      }
+   530→    },
+   531→    []
+   532→  )
+   533→
+   534→  /* ---------------- render ------------------------------------------ */
+   535→
+   536→  return (
+   537→    <group ref={root} position={position} rotation={rotation} scale={scale}>
+   538→      {/* Case + bottom cap */}
+   539→      <RoundedBox args={[4.8, 3.56, 2.5]} radius={0.14} smoothness={4} position={[0, 2.12, 0]} castShadow receiveShadow material={mats.body} />
+   540→      <RoundedBox args={[4.55, 0.34, 2.3]} radius={0.1} smoothness={4} position={[0, 0.17, 0]} castShadow receiveShadow material={mats.trim} />
+   541→
+   542→      {/* Bottom mounting screws */}
+   543→      {BOTTOM_SCREWS.map(([x, z]) => (
+   544→        <mesh key={`bs-${x}-${z}`} position={[x, 0.06, z]} castShadow material={mats.steel}>
+   545→          <cylinderGeometry args={[0.22, 0.22, 0.14, 20]} />
+   546→        </mesh>
+   547→      ))}
+   548→
+   549→      {/* Top boss (chamfered) + shaft well */}
+   550→      <mesh position={[0, 4.16, 0]} castShadow receiveShadow material={mats.body}>
+   551→        <cylinderGeometry args={[1.25, 1.25, 0.52, 48]} />
+   552→      </mesh>
+   553→      <mesh position={[0, 4.46, 0]} castShadow material={mats.body}>
+   554→        <cylinderGeometry args={[1.16, 1.25, 0.1, 48]} />
+   555→      </mesh>
+   556→      <mesh position={[0, 4.525, 0]} material={mats.trim}>
+   557→        <cylinderGeometry args={[0.52, 0.52, 0.035, 32]} />
+   558→      </mesh>
+   559→
+   560→      {/* Rear case screws (top face) */}
+   561→      {TOP_SCREWS.map(([x, z]) => (
+   562→        <group key={`ts-${x}-${z}`} position={[x, 3.93, z]}>
+   563→          <mesh castShadow material={mats.steel}>
+   564→            <cylinderGeometry args={[0.17, 0.17, 0.1, 24]} />
+   565→          </mesh>
+   566→          <mesh position={[0, 0.051, 0]} material={mats.trim}>
+   567→            <boxGeometry args={[0.26, 0.03, 0.07]} />
+   568→          </mesh>
+   569→        </group>
+   570→      ))}
+   571→
+   572→      {/* Mounting tabs with M3 holes + support gussets */}
+   573→      <mesh geometry={geo.tab} position={[2.82, 2.63, 0]} castShadow receiveShadow material={mats.body} />
+   574→      <mesh geometry={geo.tab} position={[-2.82, 2.63, 0]} rotation-y={Math.PI} castShadow receiveShadow material={mats.body} />
+   575→      <mesh position={[2.38, 2.28, 0]} rotation-z={-0.55} castShadow material={mats.body}>
+   576→        <boxGeometry args={[0.55, 1.05, 1.85]} />
+   577→      </mesh>
+   578→      <mesh position={[-2.38, 2.28, 0]} rotation-z={0.55} castShadow material={mats.body}>
+   579→        <boxGeometry args={[0.55, 1.05, 1.85]} />
+   580→      </mesh>
+   581→
+   582→      {/* Side label plate */}
+   583→      <RoundedBox args={[2.7, 1.5, 0.06]} radius={0.04} smoothness={3} position={[0.35, 2.25, 1.27]} material={mats.label} />
+   584→      <mesh position={[0.42, 2.62, 1.31]} material={mats.ink}>
+   585→        <boxGeometry args={[1.85, 0.16, 0.03]} />
+   586→      </mesh>
+   587→      <mesh position={[0.42, 2.32, 1.31]} material={mats.ink}>
+   588→        <boxGeometry args={[1.5, 0.1, 0.03]} />
+   589→      </mesh>
+   590→      <mesh position={[0.42, 2.02, 1.31]} material={mats.ink}>
+   591→        <boxGeometry args={[1.65, 0.1, 0.03]} />
+   592→      </mesh>
+   593→
+   594→      {/* Rear cable grommet */}
+   595→      <RoundedBox args={[0.55, 1.05, 0.85]} radius={0.12} smoothness={3} position={[-2.42, 1.6, 0]} castShadow material={mats.trim} />
+   596→
+   597→      {/* -------- rotating output: shaft + horn + screw -------- */}
+   598→      <group ref={rotor} onPointerDown={beginDrag} onPointerOver={onRotorOver} onPointerOut={onRotorOut}>
+   599→        {/* Splined brass shaft */}
+   600→        <mesh position={[0, 4.84, 0]} castShadow material={mats.brass}>
+   601→          <cylinderGeometry args={[0.36, 0.36, 0.68, 14]} />
+   602→        </mesh>
+   603→        <mesh position={[0, 4.56, 0]} castShadow material={mats.steel}>
+   604→          <cylinderGeometry args={[0.42, 0.42, 0.1, 24]} />
+   605→        </mesh>
+   606→
+   607→        {showHorn && (
+   608→          <group position={[0, 5.18, 0]}>
+   609→            {/* Hub */}
+   610→            <mesh position={[0, 0.15, 0]} castShadow material={mats.horn}>
+   611→              <cylinderGeometry args={[0.62, 0.62, 0.3, 32]} />
+   612→            </mesh>
+   613→
+   614→            {hornType === 'single' && <mesh geometry={geo.arm} castShadow material={mats.horn} />}
+   615→            {hornType === 'double' && (
+   616→              <>
+   617→                <mesh geometry={geo.arm} castShadow material={mats.horn} />
+   618→                <mesh geometry={geo.arm} rotation-y={Math.PI} castShadow material={mats.horn} />
+   619→              </>
+   620→            )}
+   621→            {hornType === 'round' && <mesh geometry={geo.disc} castShadow material={mats.horn} />}
+   622→
+   623→            {/* Center retaining screw */}
+   624→            <mesh position={[0, 0.34, 0]} castShadow material={mats.steel}>
+   625→              <cylinderGeometry args={[0.2, 0.2, 0.09, 20]} />
+   626→            </mesh>
+   627→            <mesh position={[0, 0.388, 0]} material={mats.trim}>
+   628→              <boxGeometry args={[0.3, 0.03, 0.07]} />
+   629→            </mesh>
+   630→          </group>
+   631→        )}
+   632→
+   633→        {/* Invisible grab volume so the horn is easy to grab */}
+   634→        {interactive && (
+   635→          <mesh position={[0, grabY, 0]} material={mats.grab}>
+   636→            <cylinderGeometry args={[grabRadius, grabRadius, 0.5, 24]} />
+   637→          </mesh>
+   638→        )}
+   639→      </group>
+   640→
+   641→      {/* -------- cable assembly -------- */}
+   642→      {showCable && (
+   643→        <group>
+   644→          <mesh geometry={geo.sheath} castShadow receiveShadow material={mats.sheath} />
+   645→          <mesh geometry={geo.wireBrown} castShadow receiveShadow material={mats.brown} />
+   646→          <mesh geometry={geo.wireRed} castShadow receiveShadow material={mats.red} />
+   647→          <mesh geometry={geo.wireOrange} castShadow receiveShadow material={mats.orange} />
+   648→
+   649→          {/* 3-pin connector */}
+   650→          <RoundedBox args={[0.85, 0.52, 1.15]} radius={0.08} smoothness={3} position={[-7.82, -0.24, 0]} castShadow material={mats.trim} />
+   651→          {CONNECTOR_PINS.map((z) => (
+   652→            <mesh key={`pin-${z}`} position={[-8.38, -0.24, z]} rotation-z={Math.PI / 2} castShadow material={mats.pin}>
+   653→              <cylinderGeometry args={[0.085, 0.085, 0.45, 12]} />
+   654→            </mesh>
+   655→          ))}
+   656→        </group>
+   657→      )}
+   658→
+   659→      {/* -------- connection ports + DOF range (assembly view) -------- */}
+   660→      {showPorts && <PortMarkers />}
+   661→
+   662→      {/* -------- floating part labels -------- */}
+   663→      {showLabels &&
+   664→        PART_LABELS.map((l) => (
+   665→          <Html key={l.text} position={l.position} center distanceFactor={13} occlude zIndexRange={[30, 0]}>
+   666→            <div className="pointer-events-none flex select-none items-center gap-1.5 whitespace-nowrap">
+   667→              <span className="h-1.5 w-1.5 rounded-full bg-amber-500 ring-2 ring-white" />
+   668→              <span className="rounded-full border border-zinc-200 bg-white/95 px-2.5 py-1 text-[11px] font-medium text-zinc-700 shadow-sm">
+   669→                {l.text}
+   670→              </span>
+   671→            </div>
+   672→          </Html>
+   673→        ))}
+   674→    </group>
+   675→  )
+   676→}
+   677→

@@ -1,0 +1,971 @@
+     1→'use client'
+     2→
+     3→/**
+     4→ * PlaygroundStage — the 3D canvas where placed components live.
+     5→ *
+     6→ * Interaction model:
+     7→ *   - pointer-down on a component → grab it (orbit controls freeze); its
+     8→ *     whole connected group comes along — wired things move together
+     9→ *   - move → the group slides along the ground plane (imperative, no
+    10→ *     re-renders); the nearest foreign component in reach gets a pulsing
+    11→ *     ring: green when the pair may REALLY connect, red when it may not
+    12→ *   - release near a CONNECTABLE neighbour → the piece slides into the
+    13→ *     connected spot as a preview and the app ASKS FOR PERMISSION; only a
+    14→ *     "Connect" answer wires them together
+    15→ *   - release near a NON-connectable pair (e.g. a servo onto a 9V
+    16→ *     battery — 9 V is outside its 4.8–7.2 V range) → nothing happens;
+    17→ *     they simply can't be connected, like real life
+    18→ *   - a click without movement → select (ring + panel)
+    19→ *   - Run → only components with a valid wire path to a power source
+    20→ *     animate; everything else stays still. Battery and board LEDs light
+    21→ *     while they are actually powering something.
+    22→ *
+    23→ * Wiring is drawn BETWEEN REAL PORTS: each connection renders a cable
+    24→ * from the provider's port (the battery's brass +/− snap terminals, the
+    25→ * controller's 5 V header) to the consumer's port (a motor's leads, a
+    26→ * servo's signal cable, the board's VIN jack). Power splices are a red +
+    27→ * black pair (red always on +); servo-style links are a 3-wire ribbon.
+    28→ * When one battery feeds several components, their wire pairs fan out
+    29→ * side by side from the same two terminals — like stacked spade lugs.
+    30→ *
+    31→ * Positions are applied ONCE on mount (never via the `position` prop) so a
+    32→ * re-render mid-drag can never snap a component back to a stale spot.
+    33→ */
+    34→
+    35→import * as React from 'react'
+    36→import { Suspense, useCallback, useEffect, useMemo, useRef } from 'react'
+    37→import * as THREE from 'three'
+    38→import { Canvas, useFrame, useThree, type ThreeEvent } from '@react-three/fiber'
+    39→import {
+    40→  ContactShadows,
+    41→  Environment,
+    42→  Grid,
+    43→  Lightformer,
+    44→  OrbitControls,
+    45→} from '@react-three/drei'
+    46→import { ServoMotor } from '@/components/three/ServoMotor'
+    47→import { GltfModel } from '@/components/three/GltfModel'
+    48→import { Battery9V, BATTERY_TERMINALS } from '@/components/three/Battery9V'
+    49→import { ArduinoUno, ARDUINO_ANCHORS } from '@/components/three/ArduinoUno'
+    50→import {
+    51→  ELEC_PORTS,
+    52→  batteriesWithLoad,
+    53→  connectBetween,
+    54→  footprintFor,
+    55→  getPort,
+    56→  groupMembers,
+    57→  sweepFor,
+    58→  subtreeIds,
+    59→  type Attach,
+    60→  type Move,
+    61→  type PlayInstance,
+    62→} from '@/lib/playground'
+    63→
+    64→const BOUND = 15
+    65→/** How far apart two components may be dropped to still snap together. */
+    66→const SNAP_REACH = 1.35
+    67→/** The visual gap kept between snapped-together components. */
+    68→const SNAP_GAP = 0.55
+    69→/** How far a DECLINED component is pushed back out of the preview spot. */
+    70→const DECLINE_GAP = 1.2
+    71→/** Lateral spacing between wire pairs sharing one battery terminal. */
+    72→const TERMINAL_SPREAD = 0.17
+    73→/** How far cables bow toward the camera side, clearing the source body. */
+    74→const BOW = 1.35
+    75→
+    76→/** The live proximity state: which neighbour is in reach, may it connect, why/why not. */
+    77→export interface LiveCandidate {
+    78→  id: string
+    79→  connectable: boolean
+    80→  reason: string
+    81→}
+    82→
+    83→/** Imperative bridge so the React layer can finish a declined connection. */
+    84→export interface StageActions {
+    85→  separate?: (childId: string, parentId: string) => void
+    86→}
+    87→
+    88→/**
+    89→ * Wire clip points registered per instance, per electrical port:
+    90→ * `red` is the + lead anchor, `black` the − lead (ribbon ports share one).
+    91→ */
+    92→export interface PortAnchor {
+    93→  red: THREE.Object3D
+    94→  black: THREE.Object3D
+    95→}
+    96→export type AnchorMap = Map<string, Map<string, PortAnchor>>
+    97→
+    98→/* ---------- helpers ---------- */
+    99→
+   100→/** Uploaded models slowly turn in place while powered and running. */
+   101→function SpinGroup({ running, children }: { running: boolean; children: React.ReactNode }) {
+   102→  const ref = useRef<THREE.Group>(null)
+   103→  useFrame((_, dt) => {
+   104→    if (running && ref.current) ref.current.rotation.y += dt * 1.1
+   105→  })
+   106→  return <group ref={ref}>{children}</group>
+   107→}
+   108→
+   109→/** A failed model load degrades to a placeholder box instead of a hole. */
+   110→class LoadBoundary extends React.Component<
+   111→  { children: React.ReactNode },
+   112→  { failed: boolean }
+   113→> {
+   114→  state = { failed: false }
+   115→  static getDerivedStateFromError() {
+   116→    return { failed: true }
+   117→  }
+   118→  render() {
+   119→    if (this.state.failed) {
+   120→      return (
+   121→        <mesh position={[0, 1.05, 0]} castShadow>
+   122→          <boxGeometry args={[1.9, 1.9, 1.9]} />
+   123→          <meshStandardMaterial color="#d4a72c" roughness={0.5} metalness={0.08} />
+   124→        </mesh>
+   125→      )
+   126→    }
+   127→    return this.props.children
+   128→  }
+   129→}
+   130→
+   131→/* ---------- cables between real ports ---------- */
+   132→
+   133→/**
+   134→ * One cable between two anchor objects. The tube geometry is rebuilt in
+   135→ * useFrame only when an endpoint actually moved — so cables stay glued
+   136→ * to their components even during imperative (mid-drag) moves, at zero
+   137→ * React render cost. `offsetA` shifts the provider-side clip point
+   138→ * (battery terminal fan-out); ribbon wires shift perpendicular to the
+   139→ * run so the three leads sit side by side like a flat cable.
+   140→ */
+   141→function Cable({
+   142→  anchors,
+   143→  parentId,
+   144→  parentPortId,
+   145→  childId,
+   146→  childPortId,
+   147→  side,
+   148→  color,
+   149→  live,
+   150→  spread,
+   151→  lateral,
+   152→  radius,
+   153→}: {
+   154→  anchors: React.RefObject<AnchorMap>
+   155→  parentId: string
+   156→  parentPortId: string
+   157→  childId: string
+   158→  childPortId: string
+   159→  /** Which lead of each port this cable carries ('red' | 'black'). */
+   160→  side: 'red' | 'black'
+   161→  color: string
+   162→  live: boolean
+   163→  /** Provider-side lateral fan-out at a shared terminal (world X). */
+   164→  spread: number
+   165→  /** Consumer-side perpendicular offset (ribbon wires; world space). */
+   166→  lateral: number
+   167→  radius: number
+   168→}) {
+   169→  const mesh = useRef<THREE.Mesh>(null)
+   170→  const lastA = useRef(new THREE.Vector3(1e9, 1e9, 1e9))
+   171→  const lastB = useRef(new THREE.Vector3(1e9, 1e9, 1e9))
+   172→  const tmp = useMemo(
+   173→    () => ({
+   174→      a: new THREE.Vector3(),
+   175→      b: new THREE.Vector3(),
+   176→      ctrl: new THREE.Vector3(),
+   177→      mid: new THREE.Vector3(),
+   178→      dir: new THREE.Vector3(),
+   179→      perp: new THREE.Vector3(),
+   180→    }),
+   181→    []
+   182→  )
+   183→
+   184→  useFrame((state) => {
+   185→    const m = mesh.current
+   186→    if (!m) return
+   187→    const parentPort = anchors.current?.get(parentId)?.get(parentPortId)
+   188→    const childPort = anchors.current?.get(childId)?.get(childPortId)
+   189→    if (!parentPort || !childPort) {
+   190→      m.visible = false
+   191→      return
+   192→    }
+   193→    m.visible = true
+   194→    ;(side === 'red' ? parentPort.red : parentPort.black).getWorldPosition(tmp.a)
+   195→    ;(side === 'red' ? childPort.red : childPort.black).getWorldPosition(tmp.b)
+   196→
+   197→    // Provider-side terminal fan-out.
+   198→    tmp.a.setX(tmp.a.x + spread)
+   199→    // Consumer-side perpendicular ribbon offset (only when nonzero).
+   200→    if (lateral !== 0) {
+   201→      tmp.dir.subVectors(tmp.b, tmp.a).setY(0)
+   202→      if (tmp.dir.lengthSq() > 1e-6) {
+   203→        tmp.perp.set(-tmp.dir.z, 0, tmp.dir.x).normalize().multiplyScalar(lateral)
+   204→        tmp.b.add(tmp.perp)
+   205→      }
+   206→    }
+   207→
+   208→    if (
+   209→      tmp.a.distanceToSquared(lastA.current) < 1e-8 &&
+   210→      tmp.b.distanceToSquared(lastB.current) < 1e-8 &&
+   211→      m.geometry.type === 'TubeGeometry'
+   212→    ) {
+   213→      return
+   214→    }
+   215→    lastA.current.copy(tmp.a)
+   216→    lastB.current.copy(tmp.b)
+   217→
+   218→    // The cable sags between the two clip points — and bows toward the
+   219→    // camera side, so it arcs AROUND the provider's own body instead of
+   220→    // disappearing behind it when the consumer sits around the back.
+   221→    tmp.mid.addVectors(tmp.a, tmp.b).multiplyScalar(0.5)
+   222→    const sagY = Math.max(0.32, Math.min(tmp.a.y, tmp.b.y) - 0.5)
+   223→    let bowX = 0
+   224→    let bowZ = 0
+   225→    tmp.dir.subVectors(tmp.b, tmp.a).setY(0)
+   226→    if (tmp.dir.lengthSq() > 1e-6) {
+   227→      tmp.perp.set(-tmp.dir.z, 0, tmp.dir.x).normalize()
+   228→      const camX = state.camera.position.x
+   229→      const camZ = state.camera.position.z
+   230→      const toCam = (camX - tmp.mid.x) * tmp.perp.x + (camZ - tmp.mid.z) * tmp.perp.z
+   231→      const sign = toCam >= 0 ? 1 : -1
+   232→      bowX = tmp.perp.x * sign * BOW
+   233→      bowZ = tmp.perp.z * sign * BOW
+   234→    }
+   235→    tmp.ctrl.set(tmp.mid.x + bowX, sagY, tmp.mid.z + bowZ)
+   236→    const curve = new THREE.QuadraticBezierCurve3(
+   237→      tmp.a.clone(),
+   238→      tmp.ctrl.clone(),
+   239→      tmp.b.clone()
+   240→    )
+   241→    const geom = new THREE.TubeGeometry(curve, 24, radius, 10, false)
+   242→    m.geometry.dispose()
+   243→    m.geometry = geom
+   244→  })
+   245→
+   246→  return (
+   247→    <mesh ref={mesh}>
+   248→      <meshStandardMaterial
+   249→        color={color}
+   250→        roughness={0.38}
+   251→        metalness={0.12}
+   252→        emissive={live ? '#b91c1c' : '#000000'}
+   253→        emissiveIntensity={live ? (side === 'red' ? 0.85 : 0.3) : 0}
+   254→      />
+   255→    </mesh>
+   256→  )
+   257→}
+   258→
+   259→/**
+   260→ * The cable(s) for one wired link, styled by the consumer's port:
+   261→ * a red + black power pair for splices, or an orange/red/brown 3-wire
+   262→ * ribbon for servo-style signal leads.
+   263→ */
+   264→function LinkWire({
+   265→  anchors,
+   266→  parentId,
+   267→  parentPortId,
+   268→  childId,
+   269→  childPortId,
+   270→  wire,
+   271→  live,
+   272→  spread,
+   273→}: {
+   274→  anchors: React.RefObject<AnchorMap>
+   275→  parentId: string
+   276→  parentPortId: string
+   277→  childId: string
+   278→  childPortId: string
+   279→  wire: 'pair' | 'ribbon3'
+   280→  live: boolean
+   281→  /** Fan-out index at the provider's terminal (multiple consumers). */
+   282→  spread: number
+   283→}) {
+   284→  if (wire === 'ribbon3') {
+   285→    return (
+   286→      <>
+   287→        <Cable anchors={anchors} parentId={parentId} parentPortId={parentPortId} childId={childId} childPortId={childPortId} side="red" color="#f97316" live={live} spread={0} lateral={-0.13} radius={0.075} />
+   288→        <Cable anchors={anchors} parentId={parentId} parentPortId={parentPortId} childId={childId} childPortId={childPortId} side="red" color="#dc2626" live={live} spread={0} lateral={0} radius={0.075} />
+   289→        <Cable anchors={anchors} parentId={parentId} parentPortId={parentPortId} childId={childId} childPortId={childPortId} side="black" color="#78350f" live={live} spread={0} lateral={0.13} radius={0.075} />
+   290→      </>
+   291→    )
+   292→  }
+   293→  return (
+   294→    <>
+   295→      <Cable anchors={anchors} parentId={parentId} parentPortId={parentPortId} childId={childId} childPortId={childPortId} side="red" color="#d92626" live={live} spread={spread} lateral={0} radius={0.11} />
+   296→      <Cable anchors={anchors} parentId={parentId} parentPortId={parentPortId} childId={childId} childPortId={childPortId} side="black" color="#23262d" live={live} spread={spread} lateral={0} radius={0.11} />
+   297→    </>
+   298→  )
+   299→}
+   300→
+   301→/* ---------- proximity: "may I connect?" ---------- */
+   302→
+   303→/** A nearby foreign component the dragged one could connect to. */
+   304→interface Candidate {
+   305→  id: string
+   306→  x: number
+   307→  z: number
+   308→  dist: number
+   309→  connectable: boolean
+   310→  reason: string
+   311→  outId: string
+   312→  inId: string
+   313→  outPortId: string
+   314→  inPortId: string
+   315→}
+   316→
+   317→/**
+   318→ * The nearest foreign instance within snap reach of the dragged group —
+   319→ * null when nothing is close enough. `connectable` + `reason` come from
+   320→ * the REAL-LIFE port matching: one side must provide power the other
+   321→ * accepts (a 9V battery onto a servo is refused — 9 V is outside the
+   322→ * MG996R's 4.8–7.2 V range).
+   323→ */
+   324→function findCandidate(
+   325→  insts: PlayInstance[],
+   326→  groups: React.RefObject<Map<string, THREE.Group>>,
+   327→  grabbedId: string,
+   328→  members: string[],
+   329→  pos: { x: number; z: number }
+   330→): Candidate | null {
+   331→  const byId = new Map(insts.map((i) => [i.id, i]))
+   332→  const grabbedInst = byId.get(grabbedId)
+   333→  if (!grabbedInst) return null
+   334→  let nearest: { id: string; x: number; z: number; dist: number } | null = null
+   335→  for (const other of insts) {
+   336→    if (members.includes(other.id)) continue
+   337→    const g = groups.current?.get(other.id)
+   338→    if (!g) continue
+   339→    const dist = Math.hypot(g.position.x - pos.x, g.position.z - pos.z)
+   340→    if (!nearest || dist < nearest.dist) {
+   341→      nearest = { id: other.id, x: g.position.x, z: g.position.z, dist }
+   342→    }
+   343→  }
+   344→  if (!nearest) return null
+   345→  const reach = footprintFor(grabbedInst.kind) + footprintFor(byId.get(nearest.id)?.kind ?? 'gltf') + SNAP_REACH
+   346→  if (nearest.dist >= reach) return null
+   347→  const targetInst = byId.get(nearest.id)
+   348→  if (!targetInst) return null
+   349→  const match = connectBetween(grabbedInst, targetInst)
+   350→  return {
+   351→    id: nearest.id,
+   352→    x: nearest.x,
+   353→    z: nearest.z,
+   354→    dist: nearest.dist,
+   355→    connectable: match.ok,
+   356→    reason: match.reason,
+   357→    outId: match.outId,
+   358→    inId: match.inId,
+   359→    outPortId: match.outPortId,
+   360→    inPortId: match.inPortId,
+   361→  }
+   362→}
+   363→
+   364→/**
+   365→ * The pulsing ring under a nearby component while something is dragged
+   366→ * toward it — green when the pair may connect, red when it may not.
+   367→ */
+   368→function PulseRing({ radius, connectable }: { radius: number; connectable: boolean }) {
+   369→  const mat = useRef<THREE.MeshBasicMaterial>(null)
+   370→  const mesh = useRef<THREE.Mesh>(null)
+   371→  useFrame(({ clock }) => {
+   372→    const k = (Math.sin(clock.elapsedTime * 4.5) + 1) / 2
+   373→    if (mat.current) mat.current.opacity = 0.3 + 0.55 * k
+   374→    if (mesh.current) mesh.current.scale.setScalar(1 + 0.05 * k)
+   375→  })
+   376→  return (
+   377→    <mesh ref={mesh} rotation-x={-Math.PI / 2} position={[0, 0.06, 0]}>
+   378→      <ringGeometry args={[radius, radius + 0.26, 64]} />
+   379→      <meshBasicMaterial
+   380→        ref={mat}
+   381→        color={connectable ? '#10b981' : '#dc2626'}
+   382→        transparent
+   383→        opacity={0.6}
+   384→        depthWrite={false}
+   385→      />
+   386→    </mesh>
+   387→  )
+   388→}
+   389→
+   390→/* ---------- one placed component ---------- */
+   391→
+   392→/**
+   393→ * Register the wire-clip anchors for one instance — the REAL connectors:
+   394→ * the battery's two brass snap terminals, the controller's VIN jack and
+   395→ * 5 V header, the servo's cable exit, nominal lead posts on uploads.
+   396→ */
+   397→function usePortAnchors(
+   398→  ref: React.RefObject<THREE.Group | null>,
+   399→  inst: PlayInstance,
+   400→  anchors: React.RefObject<AnchorMap>
+   401→) {
+   402→  useEffect(() => {
+   403→    const g = ref.current
+   404→    if (!g) return
+   405→    const map = new Map<string, PortAnchor>()
+   406→    const created: THREE.Object3D[] = []
+   407→
+   408→    const addSingle = (portId: string, pos: [number, number, number]) => {
+   409→      const o = new THREE.Object3D()
+   410→      o.position.set(pos[0], pos[1], pos[2])
+   411→      g.add(o)
+   412→      created.push(o)
+   413→      map.set(portId, { red: o, black: o })
+   414→    }
+   415→    const addPair = (
+   416→      portId: string,
+   417→      plus: [number, number, number],
+   418→      minus: [number, number, number]
+   419→    ) => {
+   420→      const r = new THREE.Object3D()
+   421→      r.position.set(plus[0], plus[1], plus[2])
+   422→      const b = new THREE.Object3D()
+   423→      b.position.set(minus[0], minus[1], minus[2])
+   424→      g.add(r)
+   425→      g.add(b)
+   426→      created.push(r, b)
+   427→      map.set(portId, { red: r, black: b })
+   428→    }
+   429→
+   430→    if (inst.kind === 'battery') {
+   431→      // The two real PP3 snap terminals on top — red goes to + (plus).
+   432→      addPair(
+   433→        'pp3',
+   434→        [BATTERY_TERMINALS.plus[0], BATTERY_TERMINALS.plus[1], 0],
+   435→        [BATTERY_TERMINALS.minus[0], BATTERY_TERMINALS.minus[1], 0]
+   436→      )
+   437→    } else if (inst.kind === 'controller') {
+   438→      // VIN jack (pair) + 5 V pin header (servo ribbon).
+   439→      addPair('vin', ARDUINO_ANCHORS.vin.plus, ARDUINO_ANCHORS.vin.minus)
+   440→      addSingle('hdr', ARDUINO_ANCHORS.header)
+   441→    } else if (inst.kind === 'servo') {
+   442→      // The cable exit grommet on the rear of the body.
+   443→      addSingle('plug', [-2.5, 1.6, 0])
+   444→    } else {
+   445→      // Uploaded models: nominal power lead posts on top.
+   446→      const y = 2.35
+   447→      addPair('leads', [0.45, y, 0], [-0.45, y, 0])
+   448→    }
+   449→
+   450→    anchors.current?.set(inst.id, map)
+   451→    return () => {
+   452→      anchors.current?.delete(inst.id)
+   453→      for (const o of created) g.remove(o)
+   454→    }
+   455→  }, [inst.id, inst.kind, ref, anchors])
+   456→}
+   457→
+   458→function Instance({
+   459→  inst,
+   460→  running,
+   461→  powered,
+   462→  energized,
+   463→  selected,
+   464→  candidate,
+   465→  groups,
+   466→  anchors,
+   467→  onDragStart,
+   468→}: {
+   469→  inst: PlayInstance
+   470→  running: boolean
+   471→  powered: boolean
+   472→  energized: boolean
+   473→  selected: boolean
+   474→  candidate: LiveCandidate | null
+   475→  groups: React.RefObject<Map<string, THREE.Group>>
+   476→  anchors: React.RefObject<AnchorMap>
+   477→  onDragStart: (e: ThreeEvent<PointerEvent>, id: string) => void
+   478→}) {
+   479→  const ref = useRef<THREE.Group>(null)
+   480→
+   481→  useEffect(() => {
+   482→    const g = ref.current
+   483→    if (!g) return
+   484→    g.position.set(inst.x, 0, inst.z)
+   485→    groups.current?.set(inst.id, g)
+   486→    // Position is set imperatively; inst.x/z only matter at mount.
+   487→  }, [inst.id, inst.x, inst.z, groups])
+   488→
+   489→  usePortAnchors(ref, inst, anchors)
+   490→
+   491→  const live = running && powered
+   492→  const ringRadius = footprintFor(inst.kind)
+   493→
+   494→  return (
+   495→    <group ref={ref} onPointerDown={(e) => onDragStart(e, inst.id)}>
+   496→      {selected && (
+   497→        <mesh rotation-x={-Math.PI / 2} position={[0, 0.03, 0]}>
+   498→          <ringGeometry args={[ringRadius, ringRadius + 0.28, 64]} />
+   499→          <meshBasicMaterial color="#f59e0b" transparent opacity={0.9} depthWrite={false} />
+   500→        </mesh>
+   501→      )}
+   502→
+   503→      {candidate?.id === inst.id && (
+   504→        <PulseRing radius={ringRadius} connectable={candidate.connectable} />
+   505→      )}
+   506→
+   507→      {inst.kind === 'servo' ? (
+   508→        <ServoMotor
+   509→          position={[0, 0.03, 0]}
+   510→          interactive
+   511→          showCable
+   512→          autoSweep={live ? sweepFor(inst.id) : false}
+   513→        />
+   514→      ) : inst.kind === 'battery' ? (
+   515→        <Battery9V position={[0, 0.03, 0]} ledOn={running && energized} />
+   516→      ) : inst.kind === 'controller' ? (
+   517→        <ArduinoUno position={[0, 0.03, 0]} ledOn={running && powered} />
+   518→      ) : inst.modelUrl ? (
+   519→        <SpinGroup running={live}>
+   520→          <Suspense fallback={null}>
+   521→            <LoadBoundary key={inst.modelUrl}>
+   522→              <GltfModel key={inst.modelUrl} url={inst.modelUrl} kind={inst.kind} />
+   523→            </LoadBoundary>
+   524→          </Suspense>
+   525→        </SpinGroup>
+   526→      ) : null}
+   527→    </group>
+   528→  )
+   529→}
+   530→
+   531→/* ---------- the scene ---------- */
+   532→
+   533→function Scene({
+   534→  instances,
+   535→  running,
+   536→  poweredIds,
+   537→  selectedId,
+   538→  groups,
+   539→  anchors,
+   540→  onSelect,
+   541→  onDropCommit,
+   542→  onConnectRequest,
+   543→  onCandidateChange,
+   544→  actionsRef,
+   545→}: {
+   546→  instances: PlayInstance[]
+   547→  running: boolean
+   548→  poweredIds: Set<string>
+   549→  selectedId: string | null
+   550→  groups: React.RefObject<Map<string, THREE.Group>>
+   551→  anchors: React.RefObject<AnchorMap>
+   552→  onSelect: (id: string) => void
+   553→  onDropCommit: (moves: Move[], attach: Attach | null) => void
+   554→  /** Fired when a component is dropped near a connectable one — the app
+   555→      must ASK FOR PERMISSION; nothing is wired until it answers.
+   556→      The parent is the side that PROVIDES power. */
+   557→  onConnectRequest: (
+   558→    parentId: string,
+   559→    childId: string,
+   560→    parentPortId: string,
+   561→    childPortId: string
+   562→  ) => void
+   563→  /** Live proximity feedback (the pulsing-ring target), or null. */
+   564→  onCandidateChange: (candidate: LiveCandidate | null) => void
+   565→  actionsRef: React.RefObject<StageActions>
+   566→}) {
+   567→  // Read controls through the store getter (mutating a subscribed hook
+   568→  // value directly trips react-hooks/immutability — ServoMotor does the same).
+   569→  const get = useThree((s) => s.get)
+   570→  // Latest instances for the drag/drop logic without re-binding listeners.
+   571→  const instancesRef = useRef(instances)
+   572→  useEffect(() => {
+   573→    instancesRef.current = instances
+   574→  }, [instances])
+   575→
+   576→  // A battery's LED means "power is flowing" — lit only while it is
+   577→  // actually wired to something it can power.
+   578→  const loadedBatteries = useMemo(() => batteriesWithLoad(instances), [instances])
+   579→
+   580→  // Per-parent fan-out indices: when one battery feeds several
+   581→  // consumers, their wire pairs attach side by side on the terminals.
+   582→  const terminalSpread = useMemo(() => {
+   583→    const byParent = new Map<string, string[]>()
+   584→    for (const inst of instances) {
+   585→      if (!inst.parentId) continue
+   586→      const list = byParent.get(inst.parentId) ?? []
+   587→      list.push(inst.id)
+   588→      byParent.set(inst.parentId, list)
+   589→    }
+   590→    const spread = new Map<string, number>()
+   591→    for (const siblings of byParent.values()) {
+   592→      siblings.forEach((childId, i) => {
+   593→        spread.set(childId, (i - (siblings.length - 1) / 2) * TERMINAL_SPREAD)
+   594→      })
+   595→    }
+   596→    return spread
+   597→  }, [instances])
+   598→
+   599→  // Which neighbour is currently in reach (for the pulsing ring + hint).
+   600→  // State only for rendering; the ref keeps the last value so the drag
+   601→  // handler can compare without stale-closure surprises.
+   602→  const candidateRef = useRef<LiveCandidate | null>(null)
+   603→  const [candidate, setCandidate] = React.useState<LiveCandidate | null>(null)
+   604→  const setCandidateLive = useCallback(
+   605→    (c: LiveCandidate | null) => {
+   606→      const prev = candidateRef.current
+   607→      const same =
+   608→        (prev?.id ?? null) === (c?.id ?? null) &&
+   609→        (prev?.connectable ?? null) === (c?.connectable ?? null)
+   610→      if (same) return
+   611→      candidateRef.current = c
+   612→      setCandidate(c)
+   613→      onCandidateChange(c)
+   614→    },
+   615→    [onCandidateChange]
+   616→  )
+   617→
+   618→  const drag = useRef<{
+   619→    id: string
+   620→    members: string[]
+   621→    starts: Map<string, { x: number; z: number }>
+   622→    grabbedStart: { x: number; z: number }
+   623→    offX: number
+   624→    offZ: number
+   625→    moved: number
+   626→  } | null>(null)
+   627→
+   628→  const onDragStart = useCallback(
+   629→    (e: ThreeEvent<PointerEvent>, id: string) => {
+   630→      if (e.pointerType === 'mouse' && e.button !== 0) return
+   631→      e.stopPropagation()
+   632→      const grabbed = groups.current?.get(id)
+   633→      if (!grabbed) return
+   634→      // The whole wired group travels together.
+   635→      const members = [...groupMembers(instancesRef.current, id)]
+   636→      const starts = new Map<string, { x: number; z: number }>()
+   637→      for (const memberId of members) {
+   638→        const g = groups.current?.get(memberId)
+   639→        if (g) starts.set(memberId, { x: g.position.x, z: g.position.z })
+   640→      }
+   641→      drag.current = {
+   642→        id,
+   643→        members,
+   644→        starts,
+   645→        grabbedStart: { x: grabbed.position.x, z: grabbed.position.z },
+   646→        offX: e.point.x - grabbed.position.x,
+   647→        offZ: e.point.z - grabbed.position.z,
+   648→        moved: 0,
+   649→      }
+   650→      const controls = (get().controls ?? null) as { enabled: boolean } | null
+   651→      if (controls) controls.enabled = false
+   652→    },
+   653→    [get, groups]
+   654→  )
+   655→
+   656→  // Release anywhere (even outside the canvas) ends a drag cleanly —
+   657→  // committing positions and, when the piece was dropped near a
+   658→  // CONNECTABLE neighbour, asking for permission instead of attaching.
+   659→  useEffect(() => {
+   660→    const finish = () => {
+   661→      const d = drag.current
+   662→      drag.current = null
+   663→      const controls = (get().controls ?? null) as { enabled: boolean } | null
+   664→      if (controls) controls.enabled = true
+   665→      setCandidateLive(null)
+   666→      if (!d) return
+   667→
+   668→      if (d.moved < 0.12) {
+   669→        onSelect(d.id)
+   670→        return
+   671→      }
+   672→
+   673→      const insts = instancesRef.current
+   674→      const byId = new Map(insts.map((i) => [i.id, i]))
+   675→      const grabbedInst = byId.get(d.id)
+   676→      const grabbedGroup = groups.current?.get(d.id)
+   677→      if (!grabbedInst || !grabbedGroup) return
+   678→
+   679→      // Collect the group's end positions.
+   680→      const moves: Move[] = d.members.map((memberId) => {
+   681→        const g = groups.current?.get(memberId)
+   682→        return { id: memberId, x: g?.position.x ?? 0, z: g?.position.z ?? 0 }
+   683→      })
+   684→
+   685→      const cand = findCandidate(insts, groups, d.id, d.members, {
+   686→        x: grabbedGroup.position.x,
+   687→        z: grabbedGroup.position.z,
+   688→      })
+   689→
+   690→      if (cand && cand.connectable) {
+   691→        const targetInst = byId.get(cand.id)
+   692→        if (targetInst) {
+   693→          // Preview: slide the grabbed piece AND everything wired below
+   694→          // it into the connected spot while the user decides. The cables
+   695→          // only appear if the answer is "Connect".
+   696→          let dx = grabbedGroup.position.x - cand.x
+   697→          let dz = grabbedGroup.position.z - cand.z
+   698→          const len = Math.hypot(dx, dz)
+   699→          if (len < 0.001) {
+   700→            dx = 1
+   701→            dz = 0
+   702→          } else {
+   703→            dx /= len
+   704→            dz /= len
+   705→          }
+   706→          const gap = footprintFor(grabbedInst.kind) + footprintFor(targetInst.kind) + SNAP_GAP
+   707→          const snappedX = THREE.MathUtils.clamp(cand.x + dx * gap, -BOUND, BOUND)
+   708→          const snappedZ = THREE.MathUtils.clamp(cand.z + dz * gap, -BOUND, BOUND)
+   709→          const deltaX = snappedX - grabbedGroup.position.x
+   710→          const deltaZ = snappedZ - grabbedGroup.position.z
+   711→          for (const memberId of subtreeIds(insts, d.id)) {
+   712→            const g = groups.current?.get(memberId)
+   713→            if (!g) continue
+   714→            g.position.x = THREE.MathUtils.clamp(g.position.x + deltaX, -BOUND, BOUND)
+   715→            g.position.z = THREE.MathUtils.clamp(g.position.z + deltaZ, -BOUND, BOUND)
+   716→            const move = moves.find((m) => m.id === memberId)
+   717→            if (move) {
+   718→              move.x = g.position.x
+   719→              move.z = g.position.z
+   720→            } else {
+   721→              moves.push({ id: memberId, x: g.position.x, z: g.position.z })
+   722→            }
+   723→          }
+   724→          onDropCommit(moves, null)
+   725→          // The parent is whichever side PROVIDES power.
+   726→          onConnectRequest(cand.outId, cand.inId, cand.outPortId, cand.inPortId)
+   727→          return
+   728→        }
+   729→      }
+   730→
+   731→      // Nothing connectable nearby (or an impossible-in-real-life pair) —
+   732→      // a plain drop.
+   733→      onDropCommit(moves, null)
+   734→    }
+   735→    window.addEventListener('pointerup', finish)
+   736→    return () => window.removeEventListener('pointerup', finish)
+   737→  }, [get, groups, onDropCommit, onSelect, onConnectRequest, setCandidateLive])
+   738→
+   739→  // "Don't connect" — push the declined piece (and its subtree) back out
+   740→  // of the preview spot so it clearly isn't wired to anything, then
+   741→  // commit the new positions.
+   742→  const separate = useCallback(
+   743→    (childId: string, parentId: string) => {
+   744→      const insts = instancesRef.current
+   745→      const child = insts.find((i) => i.id === childId)
+   746→      const parent = insts.find((i) => i.id === parentId)
+   747→      const childGroup = groups.current?.get(childId)
+   748→      const parentGroup = groups.current?.get(parentId)
+   749→      if (!child || !parent || !childGroup || !parentGroup) return
+   750→
+   751→      let dx = childGroup.position.x - parentGroup.position.x
+   752→      let dz = childGroup.position.z - parentGroup.position.z
+   753→      const len = Math.hypot(dx, dz)
+   754→      if (len < 0.001) {
+   755→        dx = 1
+   756→        dz = 0
+   757→      } else {
+   758→        dx /= len
+   759→        dz /= len
+   760→      }
+   761→      const clearGap = footprintFor(child.kind) + footprintFor(parent.kind) + DECLINE_GAP
+   762→      const targetX = THREE.MathUtils.clamp(parentGroup.position.x + dx * clearGap, -BOUND, BOUND)
+   763→      const targetZ = THREE.MathUtils.clamp(parentGroup.position.z + dz * clearGap, -BOUND, BOUND)
+   764→      const deltaX = targetX - childGroup.position.x
+   765→      const deltaZ = targetZ - childGroup.position.z
+   766→
+   767→      const moves: Move[] = []
+   768→      for (const memberId of subtreeIds(insts, childId)) {
+   769→        const g = groups.current?.get(memberId)
+   770→        if (!g) continue
+   771→        g.position.x = THREE.MathUtils.clamp(g.position.x + deltaX, -BOUND, BOUND)
+   772→        g.position.z = THREE.MathUtils.clamp(g.position.z + deltaZ, -BOUND, BOUND)
+   773→        moves.push({ id: memberId, x: g.position.x, z: g.position.z })
+   774→      }
+   775→      onDropCommit(moves, null)
+   776→    },
+   777→    [groups, onDropCommit]
+   778→  )
+   779→
+   780→  // Expose the imperative actions to the React layer (decline handling).
+   781→  useEffect(() => {
+   782→    if (actionsRef.current) actionsRef.current.separate = separate
+   783→  }, [actionsRef, separate])
+   784→
+   785→  const handleMove = (e: ThreeEvent<PointerEvent>) => {
+   786→    const d = drag.current
+   787→    if (!d) return
+   788→    const grabbedGroup = groups.current?.get(d.id)
+   789→    if (!grabbedGroup) return
+   790→    const x = THREE.MathUtils.clamp(e.point.x - d.offX, -BOUND, BOUND)
+   791→    const z = THREE.MathUtils.clamp(e.point.z - d.offZ, -BOUND, BOUND)
+   792→    const deltaX = x - d.grabbedStart.x
+   793→    const deltaZ = z - d.grabbedStart.z
+   794→    for (const memberId of d.members) {
+   795→      const g = groups.current?.get(memberId)
+   796→      const start = d.starts.get(memberId)
+   797→      if (!g || !start) continue
+   798→      g.position.x = THREE.MathUtils.clamp(start.x + deltaX, -BOUND, BOUND)
+   799→      g.position.z = THREE.MathUtils.clamp(start.z + deltaZ, -BOUND, BOUND)
+   800→    }
+   801→    d.moved = Math.max(d.moved, Math.hypot(x - d.grabbedStart.x, z - d.grabbedStart.z))
+   802→
+   803→    // Live proximity: pulse the nearest neighbour when it's in reach.
+   804→    const cand = findCandidate(instancesRef.current, groups, d.id, d.members, {
+   805→      x: grabbedGroup.position.x,
+   806→      z: grabbedGroup.position.z,
+   807→    })
+   808→    setCandidateLive(
+   809→      cand ? { id: cand.id, connectable: cand.connectable, reason: cand.reason } : null
+   810→    )
+   811→  }
+   812→
+   813→  return (
+   814→    <>
+   815→      <ambientLight intensity={0.42} />
+   816→      <directionalLight
+   817→        position={[5, 9, 6]}
+   818→        intensity={2.3}
+   819→        castShadow
+   820→        shadow-mapSize={[2048, 2048]}
+   821→        shadow-camera-left={-18}
+   822→        shadow-camera-right={18}
+   823→        shadow-camera-top={18}
+   824→        shadow-camera-bottom={-18}
+   825→        shadow-camera-near={1}
+   826→        shadow-camera-far={40}
+   827→        shadow-bias={-0.0003}
+   828→        shadow-normalBias={0.02}
+   829→      />
+   830→      <directionalLight position={[-7, 4, -6]} intensity={0.55} />
+   831→
+   832→      <Environment resolution={256} frames={1} environmentIntensity={0.62}>
+   833→        <Lightformer form="rect" intensity={3} position={[0, 6, 0]} rotation-x={Math.PI / 2} scale={[9, 9, 1]} color="#ffffff" />
+   834→        <Lightformer form="rect" intensity={1.8} position={[6, 3, 4]} rotation-y={-Math.PI / 3} scale={[6, 3, 1]} color="#fff2df" />
+   835→        <Lightformer form="rect" intensity={1.8} position={[-6, 2, -3]} rotation-y={Math.PI / 2.5} scale={[5, 3, 1]} color="#eef2f8" />
+   836→      </Environment>
+   837→
+   838→      <Grid
+   839→        position={[0, 0.001, 0]}
+   840→        args={[90, 90]}
+   841→        cellSize={0.55}
+   842→        cellThickness={0.6}
+   843→        cellColor="#d3d6dd"
+   844→        sectionSize={2.75}
+   845→        sectionThickness={1}
+   846→        sectionColor="#b9bfc9"
+   847→        fadeDistance={40}
+   848→        fadeStrength={1.4}
+   849→        infiniteGrid
+   850→        followCamera={false}
+   851→      />
+   852→      <ContactShadows
+   853→        position={[0, 0.02, 0]}
+   854→        opacity={0.5}
+   855→        scale={44}
+   856→        blur={2.4}
+   857→        far={4}
+   858→        resolution={512}
+   859→        color="#18181b"
+   860→      />
+   861→
+   862→      {/* Invisible ground plane — the drag surface */}
+   863→      <mesh rotation-x={-Math.PI / 2} onPointerMove={handleMove}>
+   864→        <planeGeometry args={[200, 200]} />
+   865→        <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+   866→      </mesh>
+   867→
+   868→      {instances.map((inst) => (
+   869→        <Instance
+   870→          key={inst.id}
+   871→          inst={inst}
+   872→          running={running}
+   873→          powered={poweredIds.has(inst.id)}
+   874→          energized={inst.kind === 'battery' && loadedBatteries.has(inst.id)}
+   875→          selected={inst.id === selectedId}
+   876→          candidate={candidate}
+   877→          groups={groups}
+   878→          anchors={anchors}
+   879→          onDragStart={onDragStart}
+   880→        />
+   881→      ))}
+   882→
+   883→      {/* Cables for every wired link — between the REAL mated ports */}
+   884→      {instances
+   885→        .filter((i) => i.parentId)
+   886→        .map((i) => {
+   887→          const inPort = getPort(i.kind, i.childPort) ?? ELEC_PORTS[i.kind]?.[0]
+   888→          return (
+   889→            <LinkWire
+   890→              key={`wire-${i.id}`}
+   891→              anchors={anchors}
+   892→              parentId={i.parentId as string}
+   893→              parentPortId={i.parentPort ?? 'pp3'}
+   894→              childId={i.id}
+   895→              childPortId={i.childPort ?? inPort?.id ?? 'leads'}
+   896→              wire={inPort?.wire ?? 'pair'}
+   897→              live={running && poweredIds.has(i.id)}
+   898→              spread={terminalSpread.get(i.id) ?? 0}
+   899→            />
+   900→          )
+   901→        })}
+   902→
+   903→      <OrbitControls
+   904→        makeDefault
+   905→        target={[0, 0.8, 0]}
+   906→        enableDamping
+   907→        dampingFactor={0.08}
+   908→        minDistance={4}
+   909→        maxDistance={45}
+   910→        maxPolarAngle={(Math.PI / 2) * 0.985}
+   911→      />
+   912→    </>
+   913→  )
+   914→}
+   915→
+   916→/* ---------- public stage ---------- */
+   917→
+   918→export default function PlaygroundStage({
+   919→  instances,
+   920→  running,
+   921→  poweredIds,
+   922→  selectedId,
+   923→  groups,
+   924→  anchors,
+   925→  onSelect,
+   926→  onDropCommit,
+   927→  onConnectRequest,
+   928→  onCandidateChange,
+   929→  actionsRef,
+   930→}: {
+   931→  instances: PlayInstance[]
+   932→  running: boolean
+   933→  poweredIds: Set<string>
+   934→  selectedId: string | null
+   935→  groups: React.RefObject<Map<string, THREE.Group>>
+   936→  anchors: React.RefObject<AnchorMap>
+   937→  onSelect: (id: string) => void
+   938→  onDropCommit: (moves: Move[], attach: Attach | null) => void
+   939→  onConnectRequest: (
+   940→    parentId: string,
+   941→    childId: string,
+   942→    parentPortId: string,
+   943→    childPortId: string
+   944→  ) => void
+   945→  onCandidateChange: (candidate: LiveCandidate | null) => void
+   946→  actionsRef: React.RefObject<StageActions>
+   947→}) {
+   948→  return (
+   949→    <Canvas
+   950→      dpr={[1, 2]}
+   951→      shadows
+   952→      gl={{ antialias: true, alpha: true, powerPreference: 'high-performance' }}
+   953→      camera={{ position: [12, 10, 14], fov: 36 }}
+   954→    >
+   955→      <Scene
+   956→        instances={instances}
+   957→        running={running}
+   958→        poweredIds={poweredIds}
+   959→        selectedId={selectedId}
+   960→        groups={groups}
+   961→        anchors={anchors}
+   962→        onSelect={onSelect}
+   963→        onDropCommit={onDropCommit}
+   964→        onConnectRequest={onConnectRequest}
+   965→        onCandidateChange={onCandidateChange}
+   966→        actionsRef={actionsRef}
+   967→      />
+   968→    </Canvas>
+   969→  )
+   970→}
+   971→
