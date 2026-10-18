@@ -215,3 +215,19 @@ Stage Summary:
 - Wiring is visually watchable: every link renders a real cable between the actual connectors — red on + and black on − at the battery's brass snap terminals (fanning out for multiple consumers), 3-wire ribbons for servo signal leads — and cables bow around the source body so they never hide behind it
 - The Arduino Uno joins as a first-class built-in (auto-seeded in Supabase) and is the honest bridge: battery → VIN → 5V header → servo, exactly like a real student robot
 - Old localStorage playgrounds migrate automatically to the new rules
+
+---
+Task ID: 11
+Agent: Main agent
+Task: User asked to "open it" — bring the app up and hand over access after the sandbox recycled
+
+Work Log:
+- Found dev server freshly running on :3000 (sandbox had reset at 06:32; dev.log shows clean boot)
+- Sandbox reset casualties confirmed: .env.local Supabase keys gone (now .env only carries DATABASE_URL) → /api/components reports mode=offline; ~/.git-credentials gone → future pushes need the token re-pasted
+- Verified app health despite offline mode: / serves 200; /api/catalog returns all 9 components with full schema (ports/dof/ai); agent-browser + VLM confirm the Components list renders cleanly (Servo Motor / 9V Battery / Arduino Uno visible, nothing broken) — all 3D models are procedural so offline mode loses nothing visually
+- Confirmed Task 10's wiring rework is live in the running build and pushed: git ls-remote shows origin/main = 217dd23 "Real-life wiring: voltage-checked connections, visible battery-terminal cables" (local 1287be8 is the platform auto-checkpoint's SHA-identical re-commit)
+- Probed preview URL patterns from inside the sandbox; the workspace domain 91bf5d5b….space-z.ai answers 410 "Recycled" (old container's route) — the live preview URL is injected by the platform chat UI's preview panel
+
+Stage Summary:
+- App is open and fully usable: real-life wiring system live, all 9 components, playground + power gating working in offline mode
+- Pending for the user: re-paste Supabase service key (to re-enable cloud DB) and GitHub token (for the next push) — both were wiped by the sandbox recycle
