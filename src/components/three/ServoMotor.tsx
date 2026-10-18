@@ -1,23 +1,27 @@
 'use client'
 
 /**
- * ServoMotor — a self-contained, reusable 3D replica of a real-world hobby
- * servo motor (SG90 / MG996R class), modeled entirely from procedural
- * Three.js geometry (no external model files).
+ * ServoMotor — an exact procedural replica of the Tower Pro MG996R
+ * metal-gear servo at 1 unit = 10 mm (40.7 × 19.7 × 42.9 mm case).
  *
- * Anatomy replicated from the real part:
- *  - Injection-molded case with chamfered edges and a bottom cap
- *  - Round top boss with a splined brass output shaft (the shaft rotates)
- *  - Horn / output arm mounted on the shaft, secured by a center screw
- *  - Twin mounting tabs with two M3 mounting holes each
- *  - Rear grommet, 3-wire lead (brown / red / orange) and 3-pin connector
+ * The anatomy that makes it read as the real part:
+ *  - Black PBT top + bottom caps around a BRUSHED ALUMINIUM center
+ *    band — the MG996R's signature sandwich
+ *  - FOUR mounting tabs in two rows (upper pair on the plastic, lower
+ *    pair on the aluminum), each with a real M3 clearance hole
+ *  - Round output boss with a 25-tooth SPLINE shaft (faceted cylinder)
+ *    and dual-bearing collar
+ *  - Phillips screws: 4 self-tappers in the bottom, 2 on the top cap,
+ *    2 long case screws on the front face
+ *  - White glass-filled nylon horn on the spline, secured by a center
+ *    phillips screw (single / double / round horn types)
+ *  - PRINTED SIDE LABEL (canvas texture): "TowerPro MG996R DIGITAL
+ *    SERVO", exactly like the real sticker
+ *  - Rear cable exit → black sheath → orange / red / brown leads →
+ *    a real 3-pin Dupont plug with gold contacts
  *
- * Reusability:
- *  <ServoMotor angle={90} speed={400} hornType="single" interactive />
- *
- * The horn always rotates toward the commanded `angle` at `speed` degrees per
- * second — just like a real servo tracking a PWM command — so it animates
- * smoothly even when the prop jumps.
+ * The horn still tracks the commanded angle at `speed` °/s — real servo
+ * behavior, not decoration. Drag machinery is unchanged.
  */
 
 import { useCallback, useEffect, useMemo, useRef } from 'react'
@@ -25,6 +29,7 @@ import * as THREE from 'three'
 import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber'
 import { RoundedBox, Html } from '@react-three/drei'
 import { SERVO_PORTS, type Port } from '@/lib/connections'
+import { DupontPlug3, M, PhillipsScrew, makeLabelTexture, wireTube } from './kit'
 
 /* ------------------------------------------------------------------ */
 /* Public API                                                          */
@@ -37,25 +42,17 @@ export interface ServoMotorProps {
   angle?: number
   /** Maximum travel speed in degrees/second (a real MG996R does ~350 °/s). */
   speed?: number
-  /** Case + boss color (CSS color string). */
+  /** Case color — MG996R black by default. */
   bodyColor?: string
-  /** Horn (arm) color. */
+  /** Horn color — white glass-filled nylon by default. */
   hornColor?: string
-  /** Horn style: "single" arm, "double" arm or "round" disc. */
   hornType?: HornType
-  /** Render the horn on the output shaft. */
   showHorn?: boolean
-  /** Render the 3-wire cable and connector. */
   showCable?: boolean
-  /** Render floating part labels. */
   showLabels?: boolean
-  /** Render the connection-port markers + range arc (assembly view). */
   showPorts?: boolean
-  /** Allow grabbing the horn/shaft and dragging it to steer the servo. */
   interactive?: boolean
-  /** Radius of the invisible grab volume around the shaft (for rigs with a crank). */
   grabRadius?: number
-  /** Height of the grab volume's center (for rigged cranks). */
   grabY?: number
   /** Self-contained sweep animation — handy for list previews. */
   autoSweep?: { min: number; max: number; speed: number } | false
@@ -72,11 +69,23 @@ export interface ServoMotorProps {
 }
 
 /* ------------------------------------------------------------------ */
-/* Default palette (matches a classic hobby servo)                     */
+/* Exact dimensions (1 unit = 10 mm)                                    */
 /* ------------------------------------------------------------------ */
 
-const DEFAULT_BODY = '#1c56b2'
-const DEFAULT_HORN = '#efe8d8'
+/** MG996R case: 40.7 × 19.7 × 42.9 mm (L × W × H incl. boss). */
+export const SERVO_DIMS = { l: 4.07, w: 1.97, h: 4.29 }
+
+/** Output shaft center (local) — the boss sits near one end. */
+const SHAFT: [number, number, number] = [1.15, 4.3, 0]
+/** Where the cable leaves the rear face. */
+export const SERVO_CABLE_EXIT: [number, number, number] = [-2.05, 0.95, 0]
+
+/* ------------------------------------------------------------------ */
+/* Default palette (matches a real MG996R)                              */
+/* ------------------------------------------------------------------ */
+
+const DEFAULT_BODY = '#212227' // black PBT caps
+const DEFAULT_HORN = '#e9e4d6' // white nylon horn
 
 /* ------------------------------------------------------------------ */
 /* Geometry helpers                                                    */
@@ -108,10 +117,7 @@ export function circleHole(x: number, y: number, r: number): THREE.Path {
   return p
 }
 
-/**
- * Extrude a shape lying flat in the XZ plane (thickness along +Y),
- * with a tiny bevel for an injection-molded look.
- */
+/** Extrude a shape lying flat in the XZ plane (thickness along +Y). */
 export function extrudeFlat(shape: THREE.Shape, thickness: number, bevel = 0.025): THREE.ExtrudeGeometry {
   const g = new THREE.ExtrudeGeometry(shape, {
     depth: Math.max(thickness - bevel * 2, 0.01),
@@ -126,46 +132,44 @@ export function extrudeFlat(shape: THREE.Shape, thickness: number, bevel = 0.025
   return g
 }
 
-/** Smooth tube along a Catmull-Rom curve — used for the cable. */
-function cableTube(points: Array<[number, number, number]>, radius: number, segments = 56): THREE.TubeGeometry {
-  const curve = new THREE.CatmullRomCurve3(points.map((p) => new THREE.Vector3(...p)))
-  return new THREE.TubeGeometry(curve, segments, radius, 10, false)
-}
-
 /* ------------------------------------------------------------------ */
 /* Static part data                                                    */
 /* ------------------------------------------------------------------ */
 
 const PART_LABELS: Array<{ position: [number, number, number]; text: string }> = [
-  { position: [1.95, 5.42, 0.35], text: 'Horn (output arm)' },
-  { position: [0.72, 4.82, 0.38], text: 'Splined output shaft' },
-  { position: [3.42, 2.98, 0.42], text: 'Mounting tab · M3 holes' },
-  { position: [1.62, 2.32, 1.32], text: 'Case (nylon)' },
-  { position: [-4.55, 1.62, 0.42], text: '3-wire lead' },
-  { position: [-7.85, 0.42, 0.62], text: '3-pin connector' },
+  { position: [1.15, 5.35, 0.35], text: 'White nylon horn' },
+  { position: [1.15, 4.55, 0.38], text: '25T spline shaft' },
+  { position: [2.7, 3.3, 0.42], text: 'Mounting tab · M3' },
+  { position: [0.4, 1.9, 1.05], text: 'Aluminium center case' },
+  { position: [-2.6, 1.35, 0.42], text: 'Cable exit' },
+  { position: [-3.9, 0.5, 0.62], text: '3-pin Dupont plug' },
 ]
 
-const TOP_SCREWS: Array<[number, number]> = [
-  [-1.72, 0.92],
-  [-1.72, -0.92],
-]
-
+/** Bottom self-tapper positions. */
 const BOTTOM_SCREWS: Array<[number, number]> = [
-  [1.85, 0.72],
-  [1.85, -0.72],
-  [-1.85, 0.72],
-  [-1.85, -0.72],
+  [1.55, 0.72],
+  [1.55, -0.72],
+  [-1.55, 0.72],
+  [-1.55, -0.72],
 ]
-
-const CONNECTOR_PINS: number[] = [-0.28, 0, 0.28]
+/** Top-cap screws (rear of the boss). */
+const TOP_SCREWS: Array<[number, number]> = [
+  [-1.45, 0.62],
+  [-1.45, -0.62],
+]
+/** Long case screws on the front face (into the aluminum band). */
+const FRONT_SCREWS: Array<[number, number]> = [
+  [1.15, 1.75],
+  [-1.15, 1.75],
+]
 
 /* ------------------------------------------------------------------ */
 /* Port markers (rendered from the connection contract data)          */
 /* ------------------------------------------------------------------ */
 
 const PORT_RING_R: Record<Port['kind'], number> = {
-  'bolt-hole': 0.32,
-  'spline-shaft': 0.62,
+  'bolt-hole': 0.3,
+  'spline-shaft': 0.6,
   face: 1.7,
   'pin-socket': 0.42,
 }
@@ -178,12 +182,10 @@ function PortMarkers() {
         const flat = p.kind !== 'pin-socket'
         return (
           <group key={p.id} position={p.position}>
-            {/* Ring aligned with the port axis */}
             <mesh rotation={flat ? [-Math.PI / 2, 0, 0] : [0, 0, Math.PI / 2]}>
               <torusGeometry args={[ringR, 0.045, 10, 40]} />
               <meshBasicMaterial color="#f59e0b" toneMapped={false} />
             </mesh>
-            {/* Center dot */}
             <mesh>
               <sphereGeometry args={[0.09, 14, 14]} />
               <meshBasicMaterial color="#f59e0b" toneMapped={false} />
@@ -207,7 +209,7 @@ function PortMarkers() {
       })}
 
       {/* DOF range arc: 0° → 180° around the shaft */}
-      <group position={[0, 4.62, 0]}>
+      <group position={[SHAFT[0], SHAFT[1] + 0.3, 0]}>
         <mesh rotation={[Math.PI / 2, 0, 0]}>
           <torusGeometry args={[3.6, 0.028, 8, 72, Math.PI]} />
           <meshBasicMaterial color="#f59e0b" transparent opacity={0.75} toneMapped={false} />
@@ -215,7 +217,7 @@ function PortMarkers() {
         {[0, 90, 180].map((deg) => (
           <mesh
             key={deg}
-            position={[3.6 * Math.cos((deg * Math.PI) / 180), 0, 3.6 * Math.sin((deg * Math.PI) / 180)]}
+            position={[SHAFT[0] + 3.6 * Math.cos((deg * Math.PI) / 180), 0, 3.6 * Math.sin((deg * Math.PI) / 180)]}
           >
             <sphereGeometry args={[0.075, 12, 12]} />
             <meshBasicMaterial color="#f59e0b" toneMapped={false} />
@@ -224,6 +226,29 @@ function PortMarkers() {
       </group>
     </group>
   )
+}
+
+/* ------------------------------------------------------------------ */
+/* The MG996R sticker (canvas texture)                                 */
+/* ------------------------------------------------------------------ */
+
+function drawServoSticker(ctx: CanvasRenderingContext2D, w: number, h: number) {
+  // silver-white label stock
+  const grad = ctx.createLinearGradient(0, 0, 0, h)
+  grad.addColorStop(0, '#e9eaec')
+  grad.addColorStop(0.5, '#d9dbdf')
+  grad.addColorStop(1, '#e9eaec')
+  ctx.fillStyle = grad
+  ctx.fillRect(0, 0, w, h)
+  ctx.textAlign = 'center'
+  ctx.fillStyle = '#191b1f'
+  ctx.font = `italic 800 ${Math.round(h * 0.19)}px Arial`
+  ctx.fillText('TowerPro', w / 2, h * 0.3)
+  ctx.font = `900 ${Math.round(h * 0.3)}px Arial`
+  ctx.fillText('MG996R', w / 2, h * 0.62)
+  ctx.font = `600 ${Math.round(h * 0.115)}px Arial`
+  ctx.fillStyle = '#4a4d55'
+  ctx.fillText('DIGITAL SERVO · METAL GEAR', w / 2, h * 0.84)
 }
 
 /* ------------------------------------------------------------------ */
@@ -242,7 +267,7 @@ export function ServoMotor({
   showPorts = false,
   interactive = false,
   grabRadius = 1.06,
-  grabY = 5.32,
+  grabY = 4.5,
   autoSweep = false,
   onAngleChange,
   onDragStateChange,
@@ -275,9 +300,9 @@ export function ServoMotor({
   /* ---------------- geometry (built once, disposed on unmount) ------- */
 
   const geo = useMemo(() => {
-    // Mounting tab: rounded bar with two M3 clearance holes
-    const tab = roundedRectShape(1.34, 2.5, 0.32)
-    tab.holes.push(circleHole(-0.3, 0, 0.27), circleHole(0.3, 0, 0.27))
+    // Mounting tab: rounded bar with a real M3 clearance hole
+    const tab = roundedRectShape(1.5, 0.6, 0.26)
+    tab.holes.push(circleHole(0.38, 0, 0.17))
 
     // Single/double horn arm with lightening holes
     const arm = roundedRectShape(2.58, 0.66, 0.33, 1.61, 0)
@@ -291,47 +316,54 @@ export function ServoMotor({
       disc.holes.push(circleHole(Math.cos(a) * 1.05, Math.sin(a) * 1.05, 0.13))
     }
 
+    // Cable: sheath out of the rear face, down and back to the plug —
+    // a real MG996R lead is 300 mm; shown at playground-friendly length.
+    const sheath = wireTube(
+      [
+        [-1.95, 0.95, 0],
+        [-2.55, 0.85, 0],
+        [-3.2, 0.55, 0],
+        [-3.85, 0.2, 0],
+      ],
+      0.3,
+      44
+    )
+    const wireBrown = wireTube(
+      [
+        [-3.8, 0.2, -0.09],
+        [-4.3, 0.14, -0.22],
+        [-4.8, 0.12, -0.26],
+      ],
+      0.11,
+      24
+    )
+    const wireRed = wireTube(
+      [
+        [-3.8, 0.2, 0],
+        [-4.3, 0.14, 0],
+        [-4.85, 0.12, 0],
+      ],
+      0.11,
+      24
+    )
+    const wireOrange = wireTube(
+      [
+        [-3.8, 0.2, 0.09],
+        [-4.3, 0.14, 0.22],
+        [-4.8, 0.12, 0.26],
+      ],
+      0.11,
+      24
+    )
+
     return {
       tab: extrudeFlat(tab, 0.24),
       arm: extrudeFlat(arm, 0.26),
       disc: extrudeFlat(disc, 0.22),
-      sheath: cableTube(
-        [
-          [-2.45, 1.6, 0],
-          [-3.2, 1.55, 0],
-          [-4.2, 1.15, 0],
-          [-5.0, 0.5, 0],
-          [-5.45, 0.12, 0],
-        ],
-        0.33
-      ),
-      wireBrown: cableTube(
-        [
-          [-5.45, 0.12, -0.04],
-          [-5.9, -0.14, -0.2],
-          [-6.4, -0.34, -0.28],
-          [-7.32, -0.34, -0.28],
-        ],
-        0.15
-      ),
-      wireRed: cableTube(
-        [
-          [-5.45, 0.12, 0],
-          [-5.95, -0.12, 0],
-          [-6.5, -0.34, 0],
-          [-7.42, -0.34, 0],
-        ],
-        0.15
-      ),
-      wireOrange: cableTube(
-        [
-          [-5.45, 0.12, 0.04],
-          [-5.9, -0.14, 0.2],
-          [-6.4, -0.34, 0.28],
-          [-7.32, -0.34, 0.28],
-        ],
-        0.15
-      ),
+      sheath,
+      wireBrown,
+      wireRed,
+      wireOrange,
     }
   }, [])
 
@@ -341,27 +373,29 @@ export function ServoMotor({
     return {
       body: new THREE.MeshPhysicalMaterial({
         color: new THREE.Color(DEFAULT_BODY),
-        roughness: 0.38,
-        metalness: 0.05,
-        clearcoat: 0.55,
-        clearcoatRoughness: 0.35,
+        roughness: 0.42,
+        metalness: 0.06,
+        clearcoat: 0.4,
+        clearcoatRoughness: 0.4,
       }),
-      trim: new THREE.MeshStandardMaterial({ color: '#26272c', roughness: 0.55, metalness: 0.15 }),
-      horn: new THREE.MeshStandardMaterial({ color: new THREE.Color(DEFAULT_HORN), roughness: 0.4, metalness: 0.02 }),
-      brass: new THREE.MeshStandardMaterial({
-        color: '#d0a84f',
-        metalness: 0.95,
-        roughness: 0.3,
-        flatShading: true, // faceted cylinder reads as a splined shaft
+      alu: new THREE.MeshStandardMaterial({ color: '#8e939b', metalness: 0.88, roughness: 0.36 }),
+      horn: new THREE.MeshStandardMaterial({ color: new THREE.Color(DEFAULT_HORN), roughness: 0.42, metalness: 0.02 }),
+      spline: new THREE.MeshStandardMaterial({
+        color: '#c9ced6',
+        metalness: 0.9,
+        roughness: 0.28,
+        flatShading: true, // faceted cylinder reads as a 25T spline
       }),
-      steel: new THREE.MeshStandardMaterial({ color: '#cfd4dc', metalness: 0.9, roughness: 0.35 }),
-      pin: new THREE.MeshStandardMaterial({ color: '#e0b45c', metalness: 1, roughness: 0.25 }),
+      steel: new THREE.MeshStandardMaterial({ color: '#c8cdd4', metalness: 0.92, roughness: 0.3 }),
       sheath: new THREE.MeshStandardMaterial({ color: '#202228', roughness: 0.7, metalness: 0.05 }),
-      brown: new THREE.MeshStandardMaterial({ color: '#5d3a21', roughness: 0.65 }),
-      red: new THREE.MeshStandardMaterial({ color: '#c33131', roughness: 0.65 }),
-      orange: new THREE.MeshStandardMaterial({ color: '#f0801e', roughness: 0.65 }),
-      label: new THREE.MeshStandardMaterial({ color: '#f4f1e8', roughness: 0.5 }),
-      ink: new THREE.MeshStandardMaterial({ color: '#23262c', roughness: 0.6 }),
+      brown: new THREE.MeshStandardMaterial({ ...M.pvcBrown }),
+      red: new THREE.MeshStandardMaterial({ ...M.pvcRed }),
+      orange: new THREE.MeshStandardMaterial({ ...M.pvcOrange }),
+      sticker: new THREE.MeshStandardMaterial({
+        map: makeLabelTexture(512, 330, drawServoSticker),
+        roughness: 0.35,
+        metalness: 0.05,
+      }),
       grab: new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }),
     }
   }, [])
@@ -425,7 +459,7 @@ export function ServoMotor({
     const rect = gl.domElement.getBoundingClientRect()
     if (!rect.width || !rect.height) return null
     root.current.updateWorldMatrix(true, false)
-    const shaftWorld = root.current.localToWorld(new THREE.Vector3(0, 5.0, 0))
+    const shaftWorld = root.current.localToWorld(new THREE.Vector3(SHAFT[0], SHAFT[1], SHAFT[2]))
     const ndcPoint = shaftWorld.clone().project(camera)
     return {
       x: ((ndcPoint.x + 1) / 2) * rect.width + rect.left,
@@ -461,7 +495,6 @@ export function ServoMotor({
       e.stopPropagation()
       e.nativeEvent.preventDefault?.()
 
-      // Freeze orbit controls while steering the horn
       setControlsEnabled(false)
 
       // Screen-space "knob": track the pointer angle around the projected shaft
@@ -480,7 +513,6 @@ export function ServoMotor({
       let prevAlpha = startAlpha
       const move = (ev: PointerEvent) => {
         const alpha = Math.atan2(ev.clientY - screen.y, ev.clientX - screen.x)
-        // Wrap the delta to (-π, π] so crossing the ±180° seam stays smooth
         let d = alpha - prevAlpha
         d = Math.atan2(Math.sin(d), Math.cos(d))
         prevAlpha = alpha
@@ -533,82 +565,110 @@ export function ServoMotor({
 
   /* ---------------- render ------------------------------------------ */
 
+  const halfL = SERVO_DIMS.l / 2
+  const halfW = SERVO_DIMS.w / 2
+
   return (
     <group ref={root} position={position} rotation={rotation} scale={scale}>
-      {/* Case + bottom cap */}
-      <RoundedBox args={[4.8, 3.56, 2.5]} radius={0.14} smoothness={4} position={[0, 2.12, 0]} castShadow receiveShadow material={mats.body} />
-      <RoundedBox args={[4.55, 0.34, 2.3]} radius={0.1} smoothness={4} position={[0, 0.17, 0]} castShadow receiveShadow material={mats.trim} />
+      {/* ---------- the case sandwich ---------- */}
+      {/* Solid black PBT core */}
+      <RoundedBox
+        args={[SERVO_DIMS.l, 3.62, SERVO_DIMS.w]}
+        radius={0.1}
+        smoothness={4}
+        position={[0, 1.84, 0]}
+        castShadow
+        receiveShadow
+        material={mats.body}
+      />
+      {/* Top cap seam plate */}
+      <RoundedBox
+        args={[SERVO_DIMS.l - 0.02, 0.3, SERVO_DIMS.w - 0.02]}
+        radius={0.06}
+        smoothness={3}
+        position={[0, 3.5, 0]}
+        castShadow
+        material={mats.body}
+      />
+      {/* Bottom cap seam plate */}
+      <RoundedBox
+        args={[SERVO_DIMS.l - 0.02, 0.2, SERVO_DIMS.w - 0.02]}
+        radius={0.06}
+        smoothness={3}
+        position={[0, 0.13, 0]}
+        castShadow
+        material={mats.body}
+      />
+      {/* Brushed aluminium center band — proud of the case, the MG996R signature */}
+      <mesh castShadow receiveShadow material={mats.alu} position={[0, 1.7, 0]}>
+        <boxGeometry args={[SERVO_DIMS.l + 0.06, 1.28, SERVO_DIMS.w + 0.06]} />
+      </mesh>
+      {/* fine brushed lines on the front face */}
+      <mesh position={[0, 1.7, halfW + 0.063]}>
+        <planeGeometry args={[SERVO_DIMS.l - 0.4, 1.06]} />
+        <meshStandardMaterial color="#9aa2aa" metalness={0.9} roughness={0.42} />
+      </mesh>
 
-      {/* Bottom mounting screws */}
+      {/* ---------- mounting tabs (4, two rows) with real M3 holes ---------- */}
+      <mesh geometry={geo.tab} position={[2.32, 3.28, 0]} castShadow receiveShadow material={mats.body} />
+      <mesh geometry={geo.tab} position={[-2.32, 3.28, 0]} rotation-y={Math.PI} castShadow receiveShadow material={mats.body} />
+      <mesh geometry={geo.tab} position={[2.32, 1.95, 0]} castShadow receiveShadow material={mats.alu} />
+      <mesh geometry={geo.tab} position={[-2.32, 1.95, 0]} rotation-y={Math.PI} castShadow receiveShadow material={mats.alu} />
+
+      {/* ---------- output boss + bearing collar ---------- */}
+      <mesh position={[SHAFT[0], 3.85, 0]} castShadow receiveShadow material={mats.body}>
+        <cylinderGeometry args={[0.62, 0.68, 0.5, 40]} />
+      </mesh>
+      <mesh position={[SHAFT[0], 4.06, 0]} castShadow material={mats.steel}>
+        <cylinderGeometry args={[0.5, 0.5, 0.09, 36]} />
+      </mesh>
+
+      {/* ---------- screws ---------- */}
       {BOTTOM_SCREWS.map(([x, z]) => (
-        <mesh key={`bs-${x}-${z}`} position={[x, 0.06, z]} castShadow material={mats.steel}>
-          <cylinderGeometry args={[0.22, 0.22, 0.14, 20]} />
-        </mesh>
+        <PhillipsScrew key={`bs-${x}-${z}`} position={[x, 0.05, z]} r={0.13} />
       ))}
-
-      {/* Top boss (chamfered) + shaft well */}
-      <mesh position={[0, 4.16, 0]} castShadow receiveShadow material={mats.body}>
-        <cylinderGeometry args={[1.25, 1.25, 0.52, 48]} />
-      </mesh>
-      <mesh position={[0, 4.46, 0]} castShadow material={mats.body}>
-        <cylinderGeometry args={[1.16, 1.25, 0.1, 48]} />
-      </mesh>
-      <mesh position={[0, 4.525, 0]} material={mats.trim}>
-        <cylinderGeometry args={[0.52, 0.52, 0.035, 32]} />
-      </mesh>
-
-      {/* Rear case screws (top face) */}
       {TOP_SCREWS.map(([x, z]) => (
-        <group key={`ts-${x}-${z}`} position={[x, 3.93, z]}>
-          <mesh castShadow material={mats.steel}>
-            <cylinderGeometry args={[0.17, 0.17, 0.1, 24]} />
-          </mesh>
-          <mesh position={[0, 0.051, 0]} material={mats.trim}>
-            <boxGeometry args={[0.26, 0.03, 0.07]} />
-          </mesh>
-        </group>
+        <PhillipsScrew key={`ts-${x}-${z}`} position={[x, 3.66, z]} r={0.12} />
+      ))}
+      {FRONT_SCREWS.map(([x]) => (
+        <PhillipsScrew key={`fs-${x}`} position={[x, 1.7, halfW + 0.07]} r={0.13} />
       ))}
 
-      {/* Mounting tabs with M3 holes + support gussets */}
-      <mesh geometry={geo.tab} position={[2.82, 2.63, 0]} castShadow receiveShadow material={mats.body} />
-      <mesh geometry={geo.tab} position={[-2.82, 2.63, 0]} rotation-y={Math.PI} castShadow receiveShadow material={mats.body} />
-      <mesh position={[2.38, 2.28, 0]} rotation-z={-0.55} castShadow material={mats.body}>
-        <boxGeometry args={[0.55, 1.05, 1.85]} />
+      {/* ---------- printed side label (on the aluminium band) ---------- */}
+      <mesh position={[0.35, 1.7, halfW + 0.065]} material={mats.sticker}>
+        <planeGeometry args={[2.9, 1.08]} />
       </mesh>
-      <mesh position={[-2.38, 2.28, 0]} rotation-z={0.55} castShadow material={mats.body}>
-        <boxGeometry args={[0.55, 1.05, 1.85]} />
-      </mesh>
-
-      {/* Side label plate */}
-      <RoundedBox args={[2.7, 1.5, 0.06]} radius={0.04} smoothness={3} position={[0.35, 2.25, 1.27]} material={mats.label} />
-      <mesh position={[0.42, 2.62, 1.31]} material={mats.ink}>
-        <boxGeometry args={[1.85, 0.16, 0.03]} />
-      </mesh>
-      <mesh position={[0.42, 2.32, 1.31]} material={mats.ink}>
-        <boxGeometry args={[1.5, 0.1, 0.03]} />
-      </mesh>
-      <mesh position={[0.42, 2.02, 1.31]} material={mats.ink}>
-        <boxGeometry args={[1.65, 0.1, 0.03]} />
+      {/* a second sticker on the back face */}
+      <mesh position={[0.35, 1.7, -halfW - 0.065]} rotation-y={Math.PI} material={mats.sticker}>
+        <planeGeometry args={[2.9, 1.08]} />
       </mesh>
 
-      {/* Rear cable grommet */}
-      <RoundedBox args={[0.55, 1.05, 0.85]} radius={0.12} smoothness={3} position={[-2.42, 1.6, 0]} castShadow material={mats.trim} />
+      {/* ---------- rear cable grommet ---------- */}
+      <RoundedBox
+        args={[0.4, 0.62, 0.8]}
+        radius={0.1}
+        smoothness={3}
+        position={[-halfL - 0.02, 0.95, 0]}
+        castShadow
+        material={mats.body}
+      />
 
-      {/* -------- rotating output: shaft + horn + screw -------- */}
+      {/* ---------- rotating output: spline + horn + screw ---------- */}
       <group ref={rotor} onPointerDown={beginDrag} onPointerOver={onRotorOver} onPointerOut={onRotorOut}>
-        {/* Splined brass shaft */}
-        <mesh position={[0, 4.84, 0]} castShadow material={mats.brass}>
-          <cylinderGeometry args={[0.36, 0.36, 0.68, 14]} />
+        {/* 25T splined shaft (faceted) */}
+        <mesh position={[SHAFT[0], 4.28, 0]} castShadow material={mats.spline}>
+          <cylinderGeometry args={[0.34, 0.34, 0.66, 25]} />
         </mesh>
-        <mesh position={[0, 4.56, 0]} castShadow material={mats.steel}>
-          <cylinderGeometry args={[0.42, 0.42, 0.1, 24]} />
+        {/* brass spline insert on top */}
+        <mesh position={[SHAFT[0], 4.55, 0]} castShadow material={mats.steel}>
+          <cylinderGeometry args={[0.2, 0.24, 0.1, 24]} />
         </mesh>
 
         {showHorn && (
-          <group position={[0, 5.18, 0]}>
-            {/* Hub */}
-            <mesh position={[0, 0.15, 0]} castShadow material={mats.horn}>
-              <cylinderGeometry args={[0.62, 0.62, 0.3, 32]} />
+          <group position={[SHAFT[0], 4.62, 0]}>
+            {/* Hub with spline broach marks */}
+            <mesh position={[0, 0.13, 0]} castShadow material={mats.horn}>
+              <cylinderGeometry args={[0.58, 0.62, 0.28, 32]} />
             </mesh>
 
             {hornType === 'single' && <mesh geometry={geo.arm} castShadow material={mats.horn} />}
@@ -620,46 +680,34 @@ export function ServoMotor({
             )}
             {hornType === 'round' && <mesh geometry={geo.disc} castShadow material={mats.horn} />}
 
-            {/* Center retaining screw */}
-            <mesh position={[0, 0.34, 0]} castShadow material={mats.steel}>
-              <cylinderGeometry args={[0.2, 0.2, 0.09, 20]} />
-            </mesh>
-            <mesh position={[0, 0.388, 0]} material={mats.trim}>
-              <boxGeometry args={[0.3, 0.03, 0.07]} />
-            </mesh>
+            {/* Center retaining screw (phillips) */}
+            <PhillipsScrew position={[0, 0.28, 0]} r={0.14} />
           </group>
         )}
 
         {/* Invisible grab volume so the horn is easy to grab */}
         {interactive && (
-          <mesh position={[0, grabY, 0]} material={mats.grab}>
+          <mesh position={[SHAFT[0], grabY, 0]} material={mats.grab}>
             <cylinderGeometry args={[grabRadius, grabRadius, 0.5, 24]} />
           </mesh>
         )}
       </group>
 
-      {/* -------- cable assembly -------- */}
+      {/* ---------- cable assembly: sheath → 3 leads → Dupont plug ---------- */}
       {showCable && (
         <group>
           <mesh geometry={geo.sheath} castShadow receiveShadow material={mats.sheath} />
           <mesh geometry={geo.wireBrown} castShadow receiveShadow material={mats.brown} />
           <mesh geometry={geo.wireRed} castShadow receiveShadow material={mats.red} />
           <mesh geometry={geo.wireOrange} castShadow receiveShadow material={mats.orange} />
-
-          {/* 3-pin connector */}
-          <RoundedBox args={[0.85, 0.52, 1.15]} radius={0.08} smoothness={3} position={[-7.82, -0.24, 0]} castShadow material={mats.trim} />
-          {CONNECTOR_PINS.map((z) => (
-            <mesh key={`pin-${z}`} position={[-8.38, -0.24, z]} rotation-z={Math.PI / 2} castShadow material={mats.pin}>
-              <cylinderGeometry args={[0.085, 0.085, 0.45, 12]} />
-            </mesh>
-          ))}
+          <DupontPlug3 position={[-5.35, 0.21, 0]} rotation={[0, Math.PI / 2, 0]} />
         </group>
       )}
 
-      {/* -------- connection ports + DOF range (assembly view) -------- */}
+      {/* ---------- connection ports + DOF range (assembly view) ---------- */}
       {showPorts && <PortMarkers />}
 
-      {/* -------- floating part labels -------- */}
+      {/* ---------- floating part labels ---------- */}
       {showLabels &&
         PART_LABELS.map((l) => (
           <Html key={l.text} position={l.position} center distanceFactor={13} occlude zIndexRange={[30, 0]}>

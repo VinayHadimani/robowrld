@@ -205,7 +205,7 @@ export const DC_MOTOR: RoboticsComponent = {
   id: 'dc-motor',
   name: 'DC Gear Motor',
   category: 'Actuators',
-  status: 'soon',
+  status: 'available',
   tagline: 'Continuous-rotation brushed DC motor with planetary gearbox.',
   description:
     'A brushed DC gear motor spins continuously in either direction — the classic traction actuator for wheels, tracks and props. The built-in gearbox trades raw speed for torque; direction and speed are set by an H-bridge (see the Speed Controller).',
@@ -263,7 +263,7 @@ export const DC_MOTOR: RoboticsComponent = {
     kind: 'procedural',
     component: 'DcGearMotor',
     dimensionAccurate: true,
-    note: 'Queued for procedural modeling — the geometry builder follows the same pipeline as the servo.',
+    note: 'Exact procedural replica — 37 mm silver gearbox barrel with M3 face holes, 6 mm flat shaft that spins when powered, black motor can, solder-tab leads. See three/DcGearMotor.tsx.',
   },
 }
 
@@ -272,7 +272,7 @@ export const STEPPER_MOTOR: RoboticsComponent = {
   id: 'stepper-motor',
   name: 'Stepper Motor',
   category: 'Actuators',
-  status: 'soon',
+  status: 'available',
   tagline: 'NEMA 17 bipolar stepper for precise open-loop positioning.',
   description:
     'A stepper motor moves in exact increments — steps — instead of to a commanded angle. Driven by a chopper driver (A4988/DRV8825 class), it gives CNC-grade positioning without any feedback sensor, at the cost of weight and heat.',
@@ -327,9 +327,9 @@ export const STEPPER_MOTOR: RoboticsComponent = {
   },
   model: {
     kind: 'procedural',
-    component: 'StepperMotor',
+    component: 'Nema17Stepper',
     dimensionAccurate: true,
-    note: 'Queued for procedural modeling.',
+    note: 'Exact procedural replica — laminated 42.3 mm stack, aluminium front plate with cap screws, 5 mm shaft that steps in visible 1.8° increments, 4-wire lead. See three/Nema17Stepper.tsx.',
   },
 }
 
@@ -338,7 +338,7 @@ export const ULTRASONIC_SENSOR: RoboticsComponent = {
   id: 'ultrasonic-sensor',
   name: 'Ultrasonic Sensor',
   category: 'Sensors',
-  status: 'soon',
+  status: 'available',
   tagline: 'HC-SR04 time-of-flight distance sensor, 2–400 cm range.',
   description:
     'The HC-SR04 bounces 40 kHz sound pulses off the nearest object and measures the echo time — a two-eyed distance sensor that works regardless of light or surface color. It is the default "eyes" of an obstacle-avoiding robot.',
@@ -392,9 +392,9 @@ export const ULTRASONIC_SENSOR: RoboticsComponent = {
   },
   model: {
     kind: 'procedural',
-    component: 'UltrasonicSensor',
+    component: 'HcSr04',
     dimensionAccurate: true,
-    note: 'Queued for procedural modeling.',
+    note: 'Exact procedural replica — blue silkscreened carrier, two Ø16 mm aluminium transducer cans with canvas-drawn perforated mesh faces, right-angle 4-pin header. See three/HcSr04.tsx.',
   },
 }
 
@@ -403,7 +403,7 @@ export const IR_SENSOR: RoboticsComponent = {
   id: 'ir-sensor',
   name: 'IR Proximity Sensor',
   category: 'Sensors',
-  status: 'soon',
+  status: 'available',
   tagline: 'Reflective infrared sensor for line following and edge detection.',
   description:
     'An IR emitter/receiver pair that detects reflectance at close range. On a line-following robot, two or three of these straddle the line and steer the wheels; aimed downward past a table edge, they detect the drop-off before the robot does.',
@@ -455,9 +455,9 @@ export const IR_SENSOR: RoboticsComponent = {
   },
   model: {
     kind: 'procedural',
-    component: 'IrProximitySensor',
+    component: 'IrSensor',
     dimensionAccurate: true,
-    note: 'Queued for procedural modeling.',
+    note: 'Exact procedural replica — TCRT5000 block with dual down-facing lenses, blue trimmer with brass screw, LM393, power LED that lights when energized. See three/IrSensor.tsx.',
   },
 }
 
@@ -466,7 +466,7 @@ export const ESC: RoboticsComponent = {
   id: 'esc',
   name: 'Speed Controller',
   category: 'Controller',
-  status: 'soon',
+  status: 'available',
   tagline: 'Bidirectional brushed ESC with BEC and PWM input.',
   description:
     'An Electronic Speed Controller is the muscle between the battery and the DC motor: it switches tens of amps through an H-bridge in response to a small PWM signal from the microcontroller, and its BEC regulator feeds 5 V back out to power the logic.',
@@ -521,9 +521,9 @@ export const ESC: RoboticsComponent = {
   },
   model: {
     kind: 'procedural',
-    component: 'SpeedController',
+    component: 'EscBoard',
     dimensionAccurate: true,
-    note: 'Queued for procedural modeling.',
+    note: 'Exact procedural replica — green power board, 4× TO-252 MOSFET bank, electrolytics, BEC regulator with lit status LED, silicone leads and Dupont signal plug. See three/EscBoard.tsx.',
   },
 }
 
@@ -532,7 +532,7 @@ export const LIPO_BATTERY: RoboticsComponent = {
   id: 'lipo-battery',
   name: 'LiPo Battery Pack',
   category: 'Power',
-  status: 'soon',
+  status: 'available',
   tagline: '3S 11.1 V lithium polymer pack with XT60 connector.',
   description:
     'The energy tank. A 3-cell lithium polymer pack delivers 11.1 V nominal at high discharge rates in a featherweight package — the standard power source for anything that moves. It demands respect: low-voltage cutoffs and fire-safe charging.',
@@ -586,9 +586,9 @@ export const LIPO_BATTERY: RoboticsComponent = {
   },
   model: {
     kind: 'procedural',
-    component: 'LipoBattery',
+    component: 'LipoPack',
     dimensionAccurate: true,
-    note: 'Queued for procedural modeling.',
+    note: 'Exact procedural replica — three bulging cell segments under a printed heat-shrink wrap, silicone main leads into a yellow XT60, 4-wire balance lead with JST-XH. See three/LipoPack.tsx.',
   },
 }
 

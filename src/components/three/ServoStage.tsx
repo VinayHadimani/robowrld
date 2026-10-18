@@ -34,7 +34,7 @@ export default function ServoStage({
   variant = 'full',
   angle = 90,
   speed = 400,
-  bodyColor = '#1c56b2',
+  bodyColor = '#212227',
   hornType = 'single',
   showCable = true,
   showLabels = false,

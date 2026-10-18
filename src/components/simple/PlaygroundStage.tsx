@@ -43,13 +43,18 @@ import {
   Lightformer,
   OrbitControls,
 } from '@react-three/drei'
-import { ServoMotor } from '@/components/three/ServoMotor'
+import { ServoMotor, SERVO_CABLE_EXIT } from '@/components/three/ServoMotor'
 import { GltfModel } from '@/components/three/GltfModel'
 import { Battery9V, BATTERY_TERMINALS } from '@/components/three/Battery9V'
 import { ArduinoUno, ARDUINO_ANCHORS } from '@/components/three/ArduinoUno'
+import { DcGearMotor, DC_MOTOR_LEADS } from '@/components/three/DcGearMotor'
+import { Nema17Stepper, STEPPER_CABLE_EXIT } from '@/components/three/Nema17Stepper'
+import { HcSr04, HCSR04_HEADER } from '@/components/three/HcSr04'
+import { IrSensor, IR_HEADER } from '@/components/three/IrSensor'
+import { EscBoard, ESC_ANCHORS } from '@/components/three/EscBoard'
+import { LipoPack, LIPO_XT60 } from '@/components/three/LipoPack'
 import {
   ELEC_PORTS,
-  batteriesWithLoad,
   connectBetween,
   footprintFor,
   getPort,
@@ -434,13 +439,37 @@ function usePortAnchors(
         [BATTERY_TERMINALS.plus[0], BATTERY_TERMINALS.plus[1], 0],
         [BATTERY_TERMINALS.minus[0], BATTERY_TERMINALS.minus[1], 0]
       )
+    } else if (inst.kind === 'lipo') {
+      // The XT60 leads at the pack's end.
+      addPair('xt60', LIPO_XT60.plus, LIPO_XT60.minus)
     } else if (inst.kind === 'controller') {
       // VIN jack (pair) + 5 V pin header (servo ribbon).
       addPair('vin', ARDUINO_ANCHORS.vin.plus, ARDUINO_ANCHORS.vin.minus)
       addSingle('hdr', ARDUINO_ANCHORS.header)
+    } else if (inst.kind === 'esc') {
+      // Battery-in pair + motor-out pair + BEC signal lead.
+      addPair('pwr', ESC_ANCHORS.pwr.plus, ESC_ANCHORS.pwr.minus)
+      addPair('moto', ESC_ANCHORS.moto.plus, ESC_ANCHORS.moto.minus)
+      addSingle('bec', ESC_ANCHORS.bec)
     } else if (inst.kind === 'servo') {
-      // The cable exit grommet on the rear of the body.
-      addSingle('plug', [-2.5, 1.6, 0])
+      // The cable exit grommet on the rear face of the body.
+      addSingle('plug', SERVO_CABLE_EXIT)
+    } else if (inst.kind === 'dcmotor') {
+      // The solder-tab leads at the rear cap.
+      addPair('leads', DC_MOTOR_LEADS.plus, DC_MOTOR_LEADS.minus)
+    } else if (inst.kind === 'stepper') {
+      // The 4-wire driver lead at the rear.
+      addPair(
+        'leads',
+        [STEPPER_CABLE_EXIT[0] - 0.9, STEPPER_CABLE_EXIT[1], 0.3],
+        [STEPPER_CABLE_EXIT[0] - 0.9, STEPPER_CABLE_EXIT[1], -0.3]
+      )
+    } else if (inst.kind === 'ultrasonic') {
+      // The 4-pin header on the back edge.
+      addPair('hdr', HCSR04_HEADER.plus, HCSR04_HEADER.minus)
+    } else if (inst.kind === 'irsensor') {
+      // The 3-pin header on the back edge.
+      addPair('hdr', IR_HEADER.plus, IR_HEADER.minus)
     } else {
       // Uploaded models: nominal power lead posts on top.
       const y = 2.35
@@ -459,7 +488,6 @@ function Instance({
   inst,
   running,
   powered,
-  energized,
   selected,
   candidate,
   groups,
@@ -469,7 +497,6 @@ function Instance({
   inst: PlayInstance
   running: boolean
   powered: boolean
-  energized: boolean
   selected: boolean
   candidate: LiveCandidate | null
   groups: React.RefObject<Map<string, THREE.Group>>
@@ -512,9 +539,21 @@ function Instance({
           autoSweep={live ? sweepFor(inst.id) : false}
         />
       ) : inst.kind === 'battery' ? (
-        <Battery9V position={[0, 0.03, 0]} ledOn={running && energized} />
+        <Battery9V position={[0, 0.03, 0]} />
       ) : inst.kind === 'controller' ? (
         <ArduinoUno position={[0, 0.03, 0]} ledOn={running && powered} />
+      ) : inst.kind === 'lipo' ? (
+        <LipoPack position={[0, 0.03, 0]} />
+      ) : inst.kind === 'esc' ? (
+        <EscBoard position={[0, 0.03, 0]} powered={running && powered} />
+      ) : inst.kind === 'dcmotor' ? (
+        <DcGearMotor position={[0, 0.03, 0]} running={live} />
+      ) : inst.kind === 'stepper' ? (
+        <Nema17Stepper position={[0, 0.03, 0]} running={live} />
+      ) : inst.kind === 'ultrasonic' ? (
+        <HcSr04 position={[0, 0.03, 0]} />
+      ) : inst.kind === 'irsensor' ? (
+        <IrSensor position={[0, 0.03, 0]} powered={running && powered} />
       ) : inst.modelUrl ? (
         <SpinGroup running={live}>
           <Suspense fallback={null}>
@@ -574,8 +613,9 @@ function Scene({
   }, [instances])
 
   // A battery's LED means "power is flowing" — lit only while it is
-  // actually wired to something it can power.
-  const loadedBatteries = useMemo(() => batteriesWithLoad(instances), [instances])
+  // actually wired to something it can power. (No longer rendered: the
+  // exact-replica battery has no fake LED; kept for API compatibility.)
+  // The Arduino ON LED is the real power indicator now.
 
   // Per-parent fan-out indices: when one battery feeds several
   // consumers, their wire pairs attach side by side on the terminals.
@@ -871,7 +911,6 @@ function Scene({
           inst={inst}
           running={running}
           powered={poweredIds.has(inst.id)}
-          energized={inst.kind === 'battery' && loadedBatteries.has(inst.id)}
           selected={inst.id === selectedId}
           candidate={candidate}
           groups={groups}

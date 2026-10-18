@@ -72,16 +72,18 @@ export interface ComponentModel {
 
 /**
  * Port positions mirror the procedural geometry in ServoMotor.tsx exactly:
- *  - Mounting tabs sit at y = 2.63 with M3 holes at local x = ±2.52 / ±3.12.
- *  - The 25T spline output shaft tops out at y ≈ 5.18 on the centerline.
- *  - The JR-style 3-pin connector lives at the end of the cable.
+ *  - Four mounting tabs in two rows: upper pair y = 3.28 (black), lower
+ *    pair y = 1.95 (aluminium), M3 holes at local x = ±2.32.
+ *  - The 25T spline output shaft tops out at y ≈ 4.6 on the boss axis
+ *    (x = +1.15 — the boss sits near one end, like the real part).
+ *  - The JR-style 3-pin Dupont plug lives at the end of the cable.
  */
 export const SERVO_PORTS: Port[] = [
   {
     id: 'mount-r1',
     label: 'Mount R1',
     kind: 'bolt-hole',
-    position: [3.12, 2.63, 0],
+    position: [2.32, 3.28, 0],
     axis: [0, 1, 0],
     spec: 'M3 clearance',
     accepts: ['bolt-hole', 'face'],
@@ -91,17 +93,17 @@ export const SERVO_PORTS: Port[] = [
     id: 'mount-r2',
     label: 'Mount R2',
     kind: 'bolt-hole',
-    position: [2.52, 2.63, 0],
+    position: [2.32, 1.95, 0],
     axis: [0, 1, 0],
     spec: 'M3 clearance',
     accepts: ['bolt-hole', 'face'],
-    labelOffset: [0.9, 0.75, 0],
+    labelOffset: [1.1, 0.75, 0],
   },
   {
     id: 'mount-l1',
     label: 'Mount L1',
     kind: 'bolt-hole',
-    position: [-3.12, 2.63, 0],
+    position: [-2.32, 3.28, 0],
     axis: [0, 1, 0],
     spec: 'M3 clearance',
     accepts: ['bolt-hole', 'face'],
@@ -111,17 +113,17 @@ export const SERVO_PORTS: Port[] = [
     id: 'mount-l2',
     label: 'Mount L2',
     kind: 'bolt-hole',
-    position: [-2.52, 2.63, 0],
+    position: [-2.32, 1.95, 0],
     axis: [0, 1, 0],
     spec: 'M3 clearance',
     accepts: ['bolt-hole', 'face'],
-    labelOffset: [-0.9, 0.75, 0],
+    labelOffset: [-1.1, 0.75, 0],
   },
   {
     id: 'shaft',
     label: 'Output shaft',
     kind: 'spline-shaft',
-    position: [0, 5.18, 0],
+    position: [1.15, 4.6, 0],
     axis: [0, 1, 0],
     spec: '25T spline · 180°',
     accepts: ['spline-shaft'],
@@ -141,7 +143,7 @@ export const SERVO_PORTS: Port[] = [
     id: 'signal',
     label: 'Signal lead',
     kind: 'pin-socket',
-    position: [-8.38, -0.24, 0],
+    position: [-4.35, 0.32, 0],
     axis: [-1, 0, 0],
     spec: 'JR 3-pin · PWM',
     accepts: ['pin-socket'],
@@ -155,7 +157,7 @@ export const SERVO_DOF: DegreeOfFreedom[] = [
     label: 'Shaft rotation',
     kind: 'rotational',
     axis: [0, 1, 0],
-    origin: [0, 4.84, 0],
+    origin: [1.15, 4.28, 0],
     range: [0, 180],
     driverPortId: 'shaft',
   },

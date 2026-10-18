@@ -9,6 +9,7 @@ const ServoStage = dynamic(() => import('@/components/three/ServoStage'), { ssr:
 const BatteryStage = dynamic(() => import('@/components/three/BatteryStage'), { ssr: false })
 const BoardStage = dynamic(() => import('@/components/three/BoardStage'), { ssr: false })
 const ModelStage = dynamic(() => import('@/components/three/ModelStage'), { ssr: false })
+const PartStage = dynamic(() => import('@/components/three/PartStage'), { ssr: false })
 
 /**
  * Component detail — a virtual version of the real machine on the left,
@@ -47,8 +48,10 @@ export function ComponentView({
             ) : c.kind === 'controller' ? (
               <BoardStage />
             ) : c.modelUrl ? (
-              <ModelStage url={c.modelUrl} kind={c.kind} autoRotate />
-            ) : null}
+              <ModelStage url={c.modelUrl} kind={c.kind as 'gltf' | 'stl'} autoRotate />
+            ) : (
+              <PartStage kind={c.kind} />
+            )}
           </div>
           <p className="mt-2 px-1 text-xs text-muted-foreground">
             {c.kind === 'servo'
@@ -57,7 +60,13 @@ export function ComponentView({
                 ? 'Wire it to components in the playground to power them.'
                 : c.kind === 'controller'
                   ? 'Wire the 9V battery into its VIN jack — its 5 V pins then power servos.'
-                  : 'Drag to orbit · scroll to zoom.'}
+                  : c.kind === 'esc'
+                    ? 'Battery into its leads, motor onto its terminals — its BEC feeds 5 V back out.'
+                    : c.kind === 'lipo'
+                      ? 'The 11.1 V tank — powers ESCs and controllers through its XT60.'
+                      : c.kind === 'stepper'
+                        ? 'Needs a current-controlled driver board — it never wires straight to a battery.'
+                        : 'Drag to orbit · scroll to zoom.'}
           </p>
         </div>
 
@@ -85,7 +94,7 @@ export function ComponentView({
             </dl>
           )}
 
-          {c.kind !== 'servo' && c.kind !== 'battery' && c.kind !== 'controller' && (
+          {(c.kind === 'gltf' || c.kind === 'stl') && (
             <dl className="text-sm">
               <div className="flex items-baseline justify-between gap-4 border-b py-1.5">
                 <dt className="shrink-0 text-muted-foreground">Format</dt>

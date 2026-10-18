@@ -28,6 +28,25 @@ type View = { name: 'list' } | { name: 'component'; slug: string } | { name: 'pl
 const SERVO_SLUG = 'servo-motor'
 const BATTERY_SLUG = '9v-battery'
 const CONTROLLER_SLUG = 'arduino-uno'
+const DC_MOTOR_SLUG = 'dc-motor'
+const STEPPER_SLUG = 'stepper-motor'
+const ULTRASONIC_SLUG = 'ultrasonic-sensor'
+const IR_SLUG = 'ir-sensor'
+const ESC_SLUG = 'esc'
+const LIPO_SLUG = 'lipo-battery'
+
+/** Built-in exact-replica kinds keyed by catalog slug. */
+const BUILTIN_KINDS: Record<string, PlayComponent['kind']> = {
+  [SERVO_SLUG]: 'servo',
+  [BATTERY_SLUG]: 'battery',
+  [CONTROLLER_SLUG]: 'controller',
+  [DC_MOTOR_SLUG]: 'dcmotor',
+  [STEPPER_SLUG]: 'stepper',
+  [ULTRASONIC_SLUG]: 'ultrasonic',
+  [IR_SLUG]: 'irsensor',
+  [ESC_SLUG]: 'esc',
+  [LIPO_SLUG]: 'lipo',
+}
 
 interface ApiComponent {
   slug: string
@@ -44,16 +63,12 @@ interface ApiComponent {
 }
 
 function toPlayComponent(c: ApiComponent): PlayComponent {
-  const kind: PlayComponent['kind'] =
-    c.slug === SERVO_SLUG
-      ? 'servo'
-      : c.slug === BATTERY_SLUG
-        ? 'battery'
-        : c.slug === CONTROLLER_SLUG
-          ? 'controller'
-          : c.modelKind === 'stl'
-            ? 'stl'
-            : 'gltf'
+  const builtin = BUILTIN_KINDS[c.slug]
+  const kind: PlayComponent['kind'] = builtin
+    ? builtin
+    : c.modelKind === 'stl'
+      ? 'stl'
+      : 'gltf'
   return {
     slug: c.slug,
     name: c.name,
@@ -70,9 +85,7 @@ function toPlayComponent(c: ApiComponent): PlayComponent {
 
 /** Only components that actually have a viewable 3D representation. */
 function isPlayable(c: ApiComponent): boolean {
-  if (c.slug === SERVO_SLUG && c.modelKind === 'procedural') return true
-  if (c.slug === BATTERY_SLUG && c.modelKind === 'procedural') return true
-  if (c.slug === CONTROLLER_SLUG && c.modelKind === 'procedural') return true
+  if (BUILTIN_KINDS[c.slug] && c.modelKind === 'procedural') return true
   if (c.source === 'user' && c.modelUrl && (c.modelKind === 'gltf' || c.modelKind === 'stl')) {
     return true
   }

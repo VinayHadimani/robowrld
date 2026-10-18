@@ -21,7 +21,18 @@ export interface SpecRow {
 }
 
 /** Which procedural/asset model renders this component. */
-export type PlayKind = 'servo' | 'battery' | 'controller' | 'gltf' | 'stl'
+export type PlayKind =
+  | 'servo'
+  | 'battery'
+  | 'controller'
+  | 'dcmotor'
+  | 'stepper'
+  | 'ultrasonic'
+  | 'irsensor'
+  | 'esc'
+  | 'lipo'
+  | 'gltf'
+  | 'stl'
 
 /** A component that has a real, viewable 3D representation. */
 export interface PlayComponent {
@@ -146,25 +157,57 @@ export interface ElecPort {
   /** Voltage provided (out) or the acceptable range (in). */
   v: [number, number]
   wire: 'pair' | 'ribbon3'
+  /** Why NOTHING can wire here, when that is the real-life answer
+   *  (e.g. a stepper needs a driver board that isn't stocked). */
+  refusal?: string
 }
 
 /**
  * The real-life electrical contract per component kind:
  *  - 9V battery: PP3 snap terminals provide 9 V.
+ *  - LiPo 3S pack: XT60 leads provide 11.1 V.
  *  - Controller (Arduino Uno): VIN jack accepts 7–12 V; when powered,
- *    its 5 V pin header feeds servos and small motors.
- *  - Servo (MG996R class): 3-pin lead accepts 4.8–7.2 V — a battery's
- *    9 V would cook it; it plugs into a controller.
- *  - Uploaded models: generic power leads, 3–12 V (typical small DC
- *    motors and similar loads people upload).
+ *    its 5 V pin header feeds servos, sensors and small loads.
+ *  - ESC: battery leads accept 7.2–16 V; its motor terminals pass
+ *    battery voltage (6–12 V) to the motor; its BEC regurgitates 5 V
+ *    for logic on a servo-style plug — exactly like a real ESC.
+ *  - Servo (MG996R class): 3-pin lead accepts 4.8–7.2 V.
+ *  - DC gear motor: bare leads accept 6–12 V (a 9 V battery spins it,
+ *    an ESC drives it — both real).
+ *  - Stepper (NEMA 17): needs a chopper driver (A4988/DRV8825) that
+ *    the library doesn't stock — it can NEVER wire straight to power,
+ *    exactly like real life.
+ *  - Sensors: 5 V logic headers — they plug into controllers/BECs,
+ *    never into batteries.
+ *  - Uploaded models: generic power leads, 3–12 V.
  */
 export const ELEC_PORTS: Record<PlayKind, ElecPort[]> = {
   battery: [{ id: 'pp3', label: 'snap terminals', role: 'out', v: [9, 9], wire: 'pair' }],
+  lipo: [{ id: 'xt60', label: 'XT60 leads', role: 'out', v: [11.1, 11.1], wire: 'pair' }],
   controller: [
     { id: 'vin', label: 'VIN power jack', role: 'in', v: [7, 12], wire: 'pair' },
     { id: 'hdr', label: '5 V pin header', role: 'out', v: [5, 5], wire: 'ribbon3' },
   ],
+  esc: [
+    { id: 'pwr', label: 'battery leads', role: 'in', v: [7.2, 16], wire: 'pair' },
+    { id: 'moto', label: 'motor terminals', role: 'out', v: [6, 12], wire: 'pair' },
+    { id: 'bec', label: 'BEC 5 V signal lead', role: 'out', v: [5, 5], wire: 'ribbon3' },
+  ],
   servo: [{ id: 'plug', label: '3-pin signal lead', role: 'in', v: [4.8, 7.2], wire: 'ribbon3' }],
+  dcmotor: [{ id: 'leads', label: 'power leads', role: 'in', v: [6, 12], wire: 'pair' }],
+  stepper: [
+    {
+      id: 'leads',
+      label: 'driver leads',
+      role: 'in',
+      v: [0, 0],
+      wire: 'ribbon3',
+      refusal:
+        'a stepper never wires straight to a battery or ESC — it needs a current-controlled driver board (A4988 / DRV8825), which the library does not stock yet',
+    },
+  ],
+  ultrasonic: [{ id: 'hdr', label: '4-pin logic header', role: 'in', v: [4.5, 5.5], wire: 'ribbon3' }],
+  irsensor: [{ id: 'hdr', label: '3-pin logic header', role: 'in', v: [3.3, 5], wire: 'ribbon3' }],
   gltf: [{ id: 'leads', label: 'power leads', role: 'in', v: [3, 12], wire: 'pair' }],
   stl: [{ id: 'leads', label: 'power leads', role: 'in', v: [3, 12], wire: 'pair' }],
 }
@@ -271,9 +314,15 @@ export function connectBetween(a: PlayInstance, b: PlayInstance): ConnectMatch {
     const inSide = aOut.length > 0 ? b : a
     const out = (aOut.length > 0 ? aOut : bOut)[0]
     const inP = (aOut.length > 0 ? bIn : aIn)[0]
-    reason = `${outSide.name}'s ${fmtV(out.v)} is outside the ${fmtV(inP.v)} ${inSide.name} accepts on its ${inP.label}`
-    if (inSide.kind === 'servo' && outSide.kind === 'battery') {
-      reason += ' — power it through a controller'
+    // A hard real-life refusal (e.g. the stepper's driver requirement)
+    // overrides the generic voltage explanation.
+    if (inP.refusal) {
+      reason = inP.refusal
+    } else {
+      reason = `${outSide.name}'s ${fmtV(out.v)} is outside the ${fmtV(inP.v)} ${inSide.name} accepts on its ${inP.label}`
+      if (inSide.kind === 'servo' && outSide.kind === 'battery') {
+        reason += ' — power it through a controller'
+      }
     }
   }
   return { ...NO_MATCH, reason }
@@ -290,12 +339,12 @@ export function areConnectable(a: PlayInstance, b: PlayInstance): boolean {
 
 /** True for components that generate power — the origin of the graph. */
 export function isPowerSource(kind: PlayKind): boolean {
-  return kind === 'battery'
+  return kind === 'battery' || kind === 'lipo'
 }
 
-/** True for components that pass power through (controller). */
+/** True for components that pass power through (controller, ESC). */
 export function isPowerBroker(kind: PlayKind): boolean {
-  return kind === 'controller'
+  return kind === 'controller' || kind === 'esc'
 }
 
 /** Approximate ground footprint radius (world units) per component kind. */
@@ -303,14 +352,26 @@ export function footprintFor(kind: PlayKind): number {
   if (kind === 'servo') return 2.35
   if (kind === 'battery') return 1.9
   if (kind === 'controller') return 4.0
+  if (kind === 'lipo') return 5.6
+  if (kind === 'esc') return 3.1
+  if (kind === 'dcmotor') return 2.3
+  if (kind === 'stepper') return 2.7
+  if (kind === 'ultrasonic') return 2.5
+  if (kind === 'irsensor') return 2.1
   return 2.15
 }
 
-/** Height where generic power leads clip on (uploaded models). */
+/** Height where the wire anchor sits (world units) per component kind. */
 export function anchorYFor(kind: PlayKind): number {
-  if (kind === 'servo') return 3.9
+  if (kind === 'servo') return 4.0
   if (kind === 'battery') return 5.0
   if (kind === 'controller') return 0.7
+  if (kind === 'lipo') return 0.9
+  if (kind === 'esc') return 0.5
+  if (kind === 'dcmotor') return 1.0
+  if (kind === 'stepper') return 1.1
+  if (kind === 'ultrasonic') return 0.6
+  if (kind === 'irsensor') return 0.5
   return 2.35
 }
 
@@ -385,7 +446,7 @@ export function poweredIds(instances: PlayInstance[]): Set<string> {
   const memo = new Map<string, boolean>()
 
   const check = (inst: PlayInstance, stack: Set<string>): boolean => {
-    if (inst.kind === 'battery') return true
+    if (isPowerSource(inst.kind)) return true
     if (memo.has(inst.id)) return memo.get(inst.id) as boolean
     if (!inst.parentId || stack.has(inst.id)) return false
     const parent = byId.get(inst.parentId)
@@ -406,8 +467,8 @@ export function poweredIds(instances: PlayInstance[]): Set<string> {
 }
 
 /**
- * Batteries that are actually powering something: at least one child is
- * wired to them with a valid link (drives the battery's load LED).
+ * Power sources that are actually powering something: at least one
+ * child is wired to them with a valid link (9V batteries and LiPos).
  */
 export function batteriesWithLoad(instances: PlayInstance[]): Set<string> {
   const byId = new Map(instances.map((i) => [i.id, i]))
@@ -415,7 +476,7 @@ export function batteriesWithLoad(instances: PlayInstance[]): Set<string> {
   for (const inst of instances) {
     if (!inst.parentId) continue
     const parent = byId.get(inst.parentId)
-    if (!parent || parent.kind !== 'battery') continue
+    if (!parent || !isPowerSource(parent.kind)) continue
     if (linkCarriesPower(parent, inst)) withLoad.add(parent.id)
   }
   return withLoad
