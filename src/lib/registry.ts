@@ -6,6 +6,16 @@ import {
   Waves,
   BatteryCharging,
   Zap,
+  RefreshCw,
+  MoveHorizontal,
+  Disc,
+  Orbit,
+  Spline,
+  Bolt,
+  Activity,
+  Fan,
+  Wind,
+  CircuitBoard,
   type LucideIcon,
 } from 'lucide-react'
 import { COMPONENTS, type ComponentCategory, type ComponentStatus } from './component-schema'
@@ -21,6 +31,16 @@ const ICONS: Record<string, LucideIcon> = {
   'ir-sensor': Waves,
   esc: Zap,
   'lipo-battery': BatteryCharging,
+  'rotary-actuator': RefreshCw,
+  'linear-actuator': MoveHorizontal,
+  'strain-wave-gear': Disc,
+  'planetary-gear': Orbit,
+  'ball-screw': Spline,
+  'm3-screw': Bolt,
+  'pneumatic-muscle': Activity,
+  'vane-actuator': Fan,
+  'mini-air-pump': Wind,
+  'electrolytic-capacitor': CircuitBoard,
 }
 
 export interface LibraryComponent {
@@ -63,4 +83,6 @@ export const CATEGORIES: Array<'All' | ComponentCategory> = [
   'Sensors',
   'Controller',
   'Power',
+  'Mechanical',
+  'Pneumatics',
 ]

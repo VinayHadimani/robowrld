@@ -34,6 +34,16 @@ const ULTRASONIC_SLUG = 'ultrasonic-sensor'
 const IR_SLUG = 'ir-sensor'
 const ESC_SLUG = 'esc'
 const LIPO_SLUG = 'lipo-battery'
+const STRAINWAVE_SLUG = 'strain-wave-gear'
+const PLANETARY_SLUG = 'planetary-gear'
+const MUSCLE_SLUG = 'pneumatic-muscle'
+const CAPACITOR_SLUG = 'electrolytic-capacitor'
+const SCREW_SLUG = 'm3-screw'
+const ROTARYACT_SLUG = 'rotary-actuator'
+const LINACT_SLUG = 'linear-actuator'
+const BALLSCREW_SLUG = 'ball-screw'
+const VANE_SLUG = 'vane-actuator'
+const AIRPUMP_SLUG = 'mini-air-pump'
 
 /** Built-in exact-replica kinds keyed by catalog slug. */
 const BUILTIN_KINDS: Record<string, PlayComponent['kind']> = {
@@ -46,6 +56,16 @@ const BUILTIN_KINDS: Record<string, PlayComponent['kind']> = {
   [IR_SLUG]: 'irsensor',
   [ESC_SLUG]: 'esc',
   [LIPO_SLUG]: 'lipo',
+  [STRAINWAVE_SLUG]: 'strainwave',
+  [PLANETARY_SLUG]: 'planetary',
+  [MUSCLE_SLUG]: 'muscle',
+  [CAPACITOR_SLUG]: 'capacitor',
+  [SCREW_SLUG]: 'screw',
+  [ROTARYACT_SLUG]: 'rotaryact',
+  [LINACT_SLUG]: 'linact',
+  [BALLSCREW_SLUG]: 'ballscrew',
+  [VANE_SLUG]: 'vaneact',
+  [AIRPUMP_SLUG]: 'airpump',
 }
 
 interface ApiComponent {

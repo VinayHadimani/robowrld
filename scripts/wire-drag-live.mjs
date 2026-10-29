@@ -44,6 +44,16 @@ const KIND_PROXY = {
   irsensor: { box: [3.8, 0.9, 1.0], grabY: 0.4 },
   esc: { box: [5.5, 1.0, 2.8], grabY: 0.5 },
   lipo: { box: [10.5, 2.4, 3.3], grabY: 1.2 },
+  strainwave: { box: [4.4, 3.6, 4.4], grabY: 1.8 },
+  planetary: { box: [4.6, 3.5, 4.6], grabY: 1.8 },
+  muscle: { box: [9.0, 2.0, 2.2], grabY: 1.0 },
+  capacitor: { box: [1.6, 3.1, 1.6], grabY: 1.5 },
+  screw: { box: [1.3, 0.55, 0.55], grabY: 0.28 },
+  rotaryact: { box: [6.6, 3.0, 3.7], grabY: 1.5 },
+  linact: { box: [19.4, 2.0, 2.0], grabY: 1.1 },
+  ballscrew: { box: [13.8, 2.8, 2.3], grabY: 1.4 },
+  vaneact: { box: [4.45, 4.0, 4.45], grabY: 1.5 },
+  airpump: { box: [7.0, 3.5, 3.0], grabY: 1.4 },
 }
 
 /**

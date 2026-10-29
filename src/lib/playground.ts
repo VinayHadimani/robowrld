@@ -31,6 +31,16 @@ export type PlayKind =
   | 'irsensor'
   | 'esc'
   | 'lipo'
+  | 'strainwave'
+  | 'planetary'
+  | 'muscle'
+  | 'capacitor'
+  | 'screw'
+  | 'rotaryact'
+  | 'linact'
+  | 'ballscrew'
+  | 'vaneact'
+  | 'airpump'
   | 'gltf'
   | 'stl'
 
@@ -141,26 +151,55 @@ export function formatBytes(n?: number | null): string {
 }
 
 /* ------------------------------------------------------------------ */
-/* Electrical ports — what connects to what, like real life            */
+/* Energy ports — electrical, mechanical and pneumatic                 */
 /* ------------------------------------------------------------------ */
 
+/** The energy domain a port carries — ports only mate within a domain. */
+export type PortDomain = 'electrical' | 'mechanical' | 'pneumatic'
+
+/** Mechanical interface subtype — rotation, linear travel, or fastening. */
+export type MechInterface = 'rotation' | 'linear' | 'fastening'
+
 /**
- * An electrical port on a component. `role: 'out'` provides power at a
- * voltage inside `v`; `role: 'in'` accepts power anywhere inside `v`.
+ * An energy port on a component.
+ *
+ *  ELECTRICAL  `role: 'out'` provides power at a voltage inside `v`;
+ *              `role: 'in'` accepts power anywhere inside `v`.
+ *  MECHANICAL  rotation ports transfer rotation (`rpm` on drivers,
+ *              `ratio` on gear stages, `pitch` mm/rev on screws);
+ *              fastening ports are M3 holes that accept a screw.
+ *  PNEUMATIC   `v` is the pressure range in bar — a pump provides it,
+ *              muscles and vane motors consume it.
+ *
  * `wire` is how a connection to this port renders: a red/black pair for
- * power splices, or a 3-wire signal ribbon for servo-style plugs.
+ * power splices, a 3-wire signal ribbon for servo-style plugs, a rigid
+ * steel coupling sleeve for shafts, or clear blue tubing for air.
  */
 export interface ElecPort {
   id: string
   label: string
   role: 'out' | 'in'
-  /** Voltage provided (out) or the acceptable range (in). */
+  /** Energy domain (default: electrical). */
+  domain?: PortDomain
+  /** Voltage (electrical) or pressure in bar (pneumatic): provided (out)
+   *  or the acceptable range (in). */
   v: [number, number]
-  wire: 'pair' | 'ribbon3'
+  wire: 'pair' | 'ribbon3' | 'coupling' | 'tubing'
+  /** Mechanical interface subtype (mechanical ports only). */
+  mech?: MechInterface
+  /** Rotation this driver's shaft turns at, while powered (RPM). */
+  rpm?: number
+  /** Gear-stage ratio: the component's own output runs at input ÷ ratio. */
+  ratio?: number
+  /** Screw lead (mm/rev): converts arriving RPM into nut travel. */
+  pitch?: number
   /** Why NOTHING can wire here, when that is the real-life answer
    *  (e.g. a stepper needs a driver board that isn't stocked). */
   refusal?: string
 }
+
+const domainOf = (p: ElecPort): PortDomain => p.domain ?? 'electrical'
+const mechOf = (p: ElecPort): MechInterface => p.mech ?? 'rotation'
 
 /**
  * The real-life electrical contract per component kind:
@@ -187,14 +226,65 @@ export const ELEC_PORTS: Record<PlayKind, ElecPort[]> = {
   controller: [
     { id: 'vin', label: 'VIN power jack', role: 'in', v: [7, 12], wire: 'pair' },
     { id: 'hdr', label: '5 V pin header', role: 'out', v: [5, 5], wire: 'ribbon3' },
+    {
+      id: 'mount',
+      label: 'M3 mounting holes',
+      role: 'out',
+      domain: 'mechanical',
+      mech: 'fastening',
+      v: [0, 0],
+      wire: 'coupling',
+    },
   ],
   esc: [
     { id: 'pwr', label: 'battery leads', role: 'in', v: [7.2, 16], wire: 'pair' },
     { id: 'moto', label: 'motor terminals', role: 'out', v: [6, 12], wire: 'pair' },
     { id: 'bec', label: 'BEC 5 V signal lead', role: 'out', v: [5, 5], wire: 'ribbon3' },
   ],
-  servo: [{ id: 'plug', label: '3-pin signal lead', role: 'in', v: [4.8, 7.2], wire: 'ribbon3' }],
-  dcmotor: [{ id: 'leads', label: 'power leads', role: 'in', v: [6, 12], wire: 'pair' }],
+  servo: [
+    { id: 'plug', label: '3-pin signal lead', role: 'in', v: [4.8, 7.2], wire: 'ribbon3' },
+    {
+      id: 'horn',
+      label: '25T spline horn',
+      role: 'out',
+      domain: 'mechanical',
+      mech: 'rotation',
+      v: [0, 0],
+      wire: 'coupling',
+      rpm: 58,
+    },
+    {
+      id: 'tabs',
+      label: 'mounting tabs (M3)',
+      role: 'out',
+      domain: 'mechanical',
+      mech: 'fastening',
+      v: [0, 0],
+      wire: 'coupling',
+    },
+  ],
+  dcmotor: [
+    { id: 'leads', label: 'power leads', role: 'in', v: [6, 12], wire: 'pair' },
+    {
+      id: 'shaft',
+      label: '6 mm output shaft',
+      role: 'out',
+      domain: 'mechanical',
+      mech: 'rotation',
+      v: [0, 0],
+      wire: 'coupling',
+      rpm: 150,
+    },
+    {
+      id: 'mount',
+      label: 'face bolt holes (M3)',
+      role: 'out',
+      domain: 'mechanical',
+      mech: 'fastening',
+      v: [0, 0],
+      wire: 'coupling',
+    },
+  ],
   stepper: [
     {
       id: 'leads',
@@ -205,9 +295,198 @@ export const ELEC_PORTS: Record<PlayKind, ElecPort[]> = {
       refusal:
         'a stepper never wires straight to a battery or ESC — it needs a current-controlled driver board (A4988 / DRV8825), which the library does not stock yet',
     },
+    {
+      id: 'shaft',
+      label: '5 mm output shaft',
+      role: 'out',
+      domain: 'mechanical',
+      mech: 'rotation',
+      v: [0, 0],
+      wire: 'coupling',
+      rpm: 200,
+    },
+    {
+      id: 'mount',
+      label: 'flange bolt holes (M3)',
+      role: 'out',
+      domain: 'mechanical',
+      mech: 'fastening',
+      v: [0, 0],
+      wire: 'coupling',
+    },
   ],
   ultrasonic: [{ id: 'hdr', label: '4-pin logic header', role: 'in', v: [4.5, 5.5], wire: 'ribbon3' }],
   irsensor: [{ id: 'hdr', label: '3-pin logic header', role: 'in', v: [3.3, 5], wire: 'ribbon3' }],
+  /* --- mechanical transmission: strain wave gear, planetary, ball screw --- */
+  strainwave: [
+    {
+      id: 'input',
+      label: 'wave-generator input shaft',
+      role: 'in',
+      domain: 'mechanical',
+      mech: 'rotation',
+      v: [0, 0],
+      wire: 'coupling',
+    },
+    {
+      id: 'output',
+      label: 'flexspline output flange',
+      role: 'out',
+      domain: 'mechanical',
+      mech: 'rotation',
+      v: [0, 0],
+      wire: 'coupling',
+      ratio: 100,
+    },
+    {
+      id: 'mount',
+      label: 'circular-spline bolt holes (M3)',
+      role: 'out',
+      domain: 'mechanical',
+      mech: 'fastening',
+      v: [0, 0],
+      wire: 'coupling',
+    },
+  ],
+  planetary: [
+    {
+      id: 'input',
+      label: 'sun input shaft',
+      role: 'in',
+      domain: 'mechanical',
+      mech: 'rotation',
+      v: [0, 0],
+      wire: 'coupling',
+    },
+    {
+      id: 'output',
+      label: 'carrier output shaft',
+      role: 'out',
+      domain: 'mechanical',
+      mech: 'rotation',
+      v: [0, 0],
+      wire: 'coupling',
+      ratio: 5,
+    },
+  ],
+  ballscrew: [
+    {
+      id: 'journal',
+      label: 'driven journal',
+      role: 'in',
+      domain: 'mechanical',
+      mech: 'rotation',
+      v: [0, 0],
+      wire: 'coupling',
+      pitch: 4,
+    },
+    {
+      id: 'nut',
+      label: 'ball-nut flange',
+      role: 'out',
+      domain: 'mechanical',
+      mech: 'linear',
+      v: [0, 0],
+      wire: 'coupling',
+    },
+    {
+      id: 'mount',
+      label: 'bearing-block bolt holes (M3)',
+      role: 'out',
+      domain: 'mechanical',
+      mech: 'fastening',
+      v: [0, 0],
+      wire: 'coupling',
+    },
+  ],
+  screw: [
+    {
+      id: 'thread',
+      label: 'M3 thread',
+      role: 'in',
+      domain: 'mechanical',
+      mech: 'fastening',
+      v: [0, 0],
+      wire: 'coupling',
+    },
+  ],
+  /* --- pneumatic: muscle, vane motor, air pump --- */
+  muscle: [
+    {
+      id: 'port',
+      label: 'air inlet fitting',
+      role: 'in',
+      domain: 'pneumatic',
+      v: [0.2, 4],
+      wire: 'tubing',
+    },
+  ],
+  vaneact: [
+    {
+      id: 'port',
+      label: 'air port (M5)',
+      role: 'in',
+      domain: 'pneumatic',
+      v: [0.15, 6],
+      wire: 'tubing',
+    },
+    {
+      id: 'mount',
+      label: 'body bolt holes (M4)',
+      role: 'out',
+      domain: 'mechanical',
+      mech: 'fastening',
+      v: [0, 0],
+      wire: 'coupling',
+    },
+  ],
+  airpump: [
+    { id: 'leads', label: 'power leads', role: 'in', v: [6, 9], wire: 'pair' },
+    {
+      id: 'air',
+      label: 'outlet nozzle',
+      role: 'out',
+      domain: 'pneumatic',
+      v: [0.4, 0.4],
+      wire: 'tubing',
+    },
+  ],
+  /* --- electrical: capacitor filter, rotary + linear actuators --- */
+  capacitor: [{ id: 'legs', label: 'lead legs (+/−)', role: 'in', v: [3, 16], wire: 'pair' }],
+  rotaryact: [
+    { id: 'leads', label: 'power leads', role: 'in', v: [6, 12], wire: 'pair' },
+    {
+      id: 'shaft',
+      label: 'keyed output shaft',
+      role: 'out',
+      domain: 'mechanical',
+      mech: 'rotation',
+      v: [0, 0],
+      wire: 'coupling',
+      rpm: 30,
+    },
+    {
+      id: 'mount',
+      label: 'flange bolt holes (M3)',
+      role: 'out',
+      domain: 'mechanical',
+      mech: 'fastening',
+      v: [0, 0],
+      wire: 'coupling',
+    },
+  ],
+  linact: [
+    { id: 'leads', label: 'power leads', role: 'in', v: [6, 12], wire: 'pair' },
+    {
+      id: 'mount',
+      label: 'mounting slots (M3)',
+      role: 'out',
+      domain: 'mechanical',
+      mech: 'fastening',
+      v: [0, 0],
+      wire: 'coupling',
+    },
+  ],
   gltf: [{ id: 'leads', label: 'power leads', role: 'in', v: [3, 12], wire: 'pair' }],
   stl: [{ id: 'leads', label: 'power leads', role: 'in', v: [3, 12], wire: 'pair' }],
 }
@@ -221,7 +500,11 @@ function fmtV(v: [number, number]): string {
   return v[0] === v[1] ? `${v[0]} V` : `${v[0]}–${v[1]} V`
 }
 
-/** True when the provided voltage lies inside the accepted range. */
+function fmtBar(v: [number, number]): string {
+  return v[0] === v[1] ? `${v[0]} bar` : `${v[0]}–${v[1]} bar`
+}
+
+/** True when the provided voltage (or pressure) lies inside the accepted range. */
 function voltageOk(out: ElecPort, inPort: ElecPort): boolean {
   return out.v[0] >= inPort.v[0] - 1e-9 && out.v[1] <= inPort.v[1] + 1e-9
 }
@@ -229,6 +512,21 @@ function voltageOk(out: ElecPort, inPort: ElecPort): boolean {
 export function getPort(kind: PlayKind, portId: string | null | undefined): ElecPort | undefined {
   if (!portId) return undefined
   return portsFor(kind).find((p) => p.id === portId)
+}
+
+/** The domain of a link’s ports — electrical unless declared otherwise. */
+export function portDomain(p: ElecPort | undefined): PortDomain {
+  return p ? domainOf(p) : 'electrical'
+}
+
+/** Do these two ports mate in real life? Same domain + same interface +
+ *  (for electricity and air) a provided value inside the accepted range. */
+function portsMate(out: ElecPort, inP: ElecPort): boolean {
+  if (out.role !== 'out' || inP.role !== 'in') return false
+  const dom = domainOf(out)
+  if (dom !== domainOf(inP)) return false
+  if (dom === 'mechanical') return mechOf(out) === mechOf(inP)
+  return voltageOk(out, inP)
 }
 
 /** The result of asking whether two components can connect, and why. */
@@ -255,68 +553,105 @@ const NO_MATCH: ConnectMatch = {
 
 /**
  * Can these two components connect IN REAL LIFE? They can when one has
- * a port that provides power at a voltage the other's port accepts:
+ * a port that provides exactly what the other’s port accepts — in ANY
+ * energy domain:
  *
- *   9V battery → motor leads (3–12 V)          ✓
- *   9V battery → controller VIN (7–12 V)       ✓
- *   controller 5 V header → servo (4.8–7.2 V)  ✓
- *   9V battery → servo (4.8–7.2 V)             ✗ — over-voltage
- *   battery ↔ battery, consumer ↔ consumer     ✗ — nothing provides power
+ *   ELECTRICAL   9V battery → motor leads (6–12 V)              ✓
+ *                controller 5 V header → servo (4.8–7.2 V)     ✓
+ *                9V battery → servo                             ✗ over-voltage
+ *   MECHANICAL   motor 6 mm shaft → strain-wave input           ✓ (150 RPM in)
+ *                strain-wave output → planetary input           ✓ (÷ 100, then ÷ 5)
+ *                M3 screw → Arduino mounting holes              ✓ fastening
+ *                motor shaft → motor shaft                       ✗ both only drive
+ *   PNEUMATIC    mini pump (0.4 bar) → muscle air inlet         ✓
+ *                mini pump → vane motor                         ✓
+ *                battery → muscle                               ✗ electricity ≠ air
+ *
+ * Electrical matches are tried first so existing wiring behavior is
+ * unchanged; the parent of a link is always the side that PROVIDES.
  */
 export function connectBetween(a: PlayInstance, b: PlayInstance): ConnectMatch {
   const aPorts = portsFor(a.kind)
   const bPorts = portsFor(b.kind)
-  const aOut = aPorts.filter((p) => p.role === 'out')
-  const bOut = bPorts.filter((p) => p.role === 'out')
-  const aIn = aPorts.filter((p) => p.role === 'in')
-  const bIn = bPorts.filter((p) => p.role === 'in')
 
-  // Prefer the tighter first match (servo before generic leads etc.).
-  for (const out of aOut) {
-    for (const inP of bIn) {
-      if (voltageOk(out, inP)) {
-        return {
-          ok: true,
-          reason: `${a.name} provides ${fmtV(out.v)} on its ${out.label}, within ${b.name}'s ${inP.label} range (${fmtV(inP.v)}).`,
-          outId: a.id,
-          inId: b.id,
-          outPortId: out.id,
-          inPortId: inP.id,
+  const trySide = (prov: PlayInstance, cons: PlayInstance): ConnectMatch | null => {
+    const provPorts = prov.id === a.id ? aPorts : bPorts
+    const consPorts = prov.id === a.id ? bPorts : aPorts
+    const domains: PortDomain[] = ['electrical', 'mechanical', 'pneumatic']
+    for (const dom of domains) {
+      for (const out of provPorts.filter((p) => domainOf(p) === dom)) {
+        for (const inP of consPorts.filter((p) => domainOf(p) === dom)) {
+          if (!portsMate(out, inP)) continue
+          let reason: string
+          if (dom === 'electrical') {
+            reason = `${prov.name} provides ${fmtV(out.v)} on its ${out.label}, within ${cons.name}'s ${inP.label} range (${fmtV(inP.v)}).`
+          } else if (dom === 'pneumatic') {
+            reason = `${prov.name} supplies ${fmtBar(out.v)} of air on its ${out.label} — inside what ${cons.name}'s ${inP.label} needs (${fmtBar(inP.v)}).`
+          } else if (mechOf(out) === 'fastening') {
+            reason = `${prov.name} offers its ${out.label} — the M3 screw threads straight in.`
+          } else if (out.rpm != null) {
+            reason = `${prov.name} drives its ${out.label} at ${out.rpm} RPM — ${cons.name}'s ${inP.label} couples onto it.`
+          } else {
+            // A gear stage feeding another stage: name the consumer’s own
+            // ratio or lead so the sentence says what the coupling does.
+            const consOut = consPorts.find(
+              (p) => domainOf(p) === 'mechanical' && p.role === 'out' && mechOf(p) === 'rotation'
+            )
+            if (inP.pitch != null) {
+              reason = `${prov.name}'s ${out.label} couples onto ${cons.name}'s ${inP.label} — each turn becomes ${inP.pitch} mm of nut travel.`
+            } else if (consOut?.ratio != null) {
+              reason = `${prov.name}'s ${out.label} couples into ${cons.name}'s ${inP.label} — the stage divides speed by ${consOut.ratio}.`
+            } else {
+              reason = `${prov.name}'s ${out.label} couples to ${cons.name}'s ${inP.label}.`
+            }
+          }
+          return {
+            ok: true,
+            reason,
+            outId: prov.id,
+            inId: cons.id,
+            outPortId: out.id,
+            inPortId: inP.id,
+          }
         }
       }
     }
-  }
-  for (const out of bOut) {
-    for (const inP of aIn) {
-      if (voltageOk(out, inP)) {
-        return {
-          ok: true,
-          reason: `${b.name} provides ${fmtV(out.v)} on its ${out.label}, within ${a.name}'s ${inP.label} range (${fmtV(inP.v)}).`,
-          outId: b.id,
-          inId: a.id,
-          outPortId: out.id,
-          inPortId: inP.id,
-        }
-      }
-    }
+    return null
   }
 
-  // No electrical match — explain WHY, like a real one would.
-  const bothSources = aOut.length > 0 && bOut.length > 0
-  const noSource = aOut.length === 0 && bOut.length === 0
+  const direct = trySide(a, b) ?? trySide(b, a)
+  if (direct) return direct
+
+  // No match in any domain — explain WHY, like a real one would.
+  const aElecOut = aPorts.filter((p) => domainOf(p) === 'electrical' && p.role === 'out')
+  const bElecOut = bPorts.filter((p) => domainOf(p) === 'electrical' && p.role === 'out')
+  const aMechOut = aPorts.filter((p) => domainOf(p) === 'mechanical' && p.role === 'out' && mechOf(p) === 'rotation')
+  const bMechOut = bPorts.filter((p) => domainOf(p) === 'mechanical' && p.role === 'out' && mechOf(p) === 'rotation')
+  const aPneuOut = aPorts.filter((p) => domainOf(p) === 'pneumatic' && p.role === 'out')
+  const bPneuOut = bPorts.filter((p) => domainOf(p) === 'pneumatic' && p.role === 'out')
+
   let reason: string
-  if (bothSources) {
+  const bothElecSources = aElecOut.length > 0 && bElecOut.length > 0
+  const noProviderAtAll =
+    aElecOut.length + bElecOut.length + aMechOut.length + bMechOut.length + aPneuOut.length + bPneuOut.length === 0
+
+  if (bothElecSources) {
     reason = `${a.name} and ${b.name} are both power sources — sources don't power each other`
-  } else if (noSource) {
-    reason = `neither provides power — connect one of them to a battery (or a powered controller) first`
-  } else {
-    const outSide = aOut.length > 0 ? a : b
-    const inSide = aOut.length > 0 ? b : a
-    const out = (aOut.length > 0 ? aOut : bOut)[0]
-    const inP = (aOut.length > 0 ? bIn : aIn)[0]
-    // A hard real-life refusal (e.g. the stepper's driver requirement)
-    // overrides the generic voltage explanation.
-    if (inP.refusal) {
+  } else if (noProviderAtAll) {
+    reason = `neither provides power, rotation or air — connect one of them to a battery, motor or pump first`
+  } else if (aElecOut.length > 0 || bElecOut.length > 0) {
+    // There IS an electrical source, but the other side won't take it.
+    const outSide = aElecOut.length > 0 ? a : b
+    const inSide = aElecOut.length > 0 ? b : a
+    const out = (aElecOut.length > 0 ? aElecOut : bElecOut)[0]
+    const inP = (aElecOut.length > 0 ? bPorts : aPorts).find((p) => p.role === 'in')
+    if (!inP) {
+      reason = `${outSide.name} provides electricity but ${inSide.name} has nothing that accepts it`
+    } else if (domainOf(inP) === 'pneumatic') {
+      reason = `${outSide.name} makes electricity, not air — ${inSide.name} needs ${fmtBar(inP.v)} of compressed air from a pump`
+    } else if (domainOf(inP) === 'mechanical') {
+      reason = `${inSide.name} needs rotation on its ${inP.label} — couple a motor's shaft into it, a battery can't drive steel`
+    } else if (inP.refusal) {
       reason = inP.refusal
     } else {
       reason = `${outSide.name}'s ${fmtV(out.v)} is outside the ${fmtV(inP.v)} ${inSide.name} accepts on its ${inP.label}`
@@ -324,6 +659,12 @@ export function connectBetween(a: PlayInstance, b: PlayInstance): ConnectMatch {
         reason += ' — power it through a controller'
       }
     }
+  } else if (aMechOut.length > 0 && bMechOut.length > 0) {
+    reason = `${a.name} and ${b.name} both only provide rotation — one side must accept it`
+  } else if (aPneuOut.length > 0 || bPneuOut.length > 0) {
+    reason = `air needs a matching air port — this pair shares none`
+  } else {
+    reason = `these two parts share no compatible interface — real parts only mate where ports match`
   }
   return { ...NO_MATCH, reason }
 }
@@ -347,6 +688,17 @@ export function isPowerBroker(kind: PlayKind): boolean {
   return kind === 'controller' || kind === 'esc'
 }
 
+/** True for components that live on compressed air, not electricity. */
+export function isPneumaticKind(kind: PlayKind): boolean {
+  return kind === 'muscle' || kind === 'vaneact'
+}
+
+/** True for components whose whole job is transmission — they need a
+ *  motor’s rotation on their input to do anything. */
+export function isMechanicalKind(kind: PlayKind): boolean {
+  return kind === 'strainwave' || kind === 'planetary' || kind === 'ballscrew'
+}
+
 /** Approximate ground footprint radius (world units) per component kind. */
 export function footprintFor(kind: PlayKind): number {
   if (kind === 'servo') return 2.35
@@ -358,6 +710,16 @@ export function footprintFor(kind: PlayKind): number {
   if (kind === 'stepper') return 2.7
   if (kind === 'ultrasonic') return 2.5
   if (kind === 'irsensor') return 2.1
+  if (kind === 'strainwave') return 2.6
+  if (kind === 'planetary') return 2.9
+  if (kind === 'muscle') return 4.6
+  if (kind === 'capacitor') return 0.95
+  if (kind === 'screw') return 0.8
+  if (kind === 'rotaryact') return 2.6
+  if (kind === 'linact') return 7.6
+  if (kind === 'ballscrew') return 8.5
+  if (kind === 'vaneact') return 2.8
+  if (kind === 'airpump') return 2.5
   return 2.15
 }
 
@@ -372,6 +734,16 @@ export function anchorYFor(kind: PlayKind): number {
   if (kind === 'stepper') return 1.1
   if (kind === 'ultrasonic') return 0.6
   if (kind === 'irsensor') return 0.5
+  if (kind === 'strainwave') return 3.2
+  if (kind === 'planetary') return 3.4
+  if (kind === 'muscle') return 1.0
+  if (kind === 'capacitor') return 1.3
+  if (kind === 'screw') return 0.35
+  if (kind === 'rotaryact') return 1.6
+  if (kind === 'linact') return 1.1
+  if (kind === 'ballscrew') return 0.9
+  if (kind === 'vaneact') return 1.5
+  if (kind === 'airpump') return 1.1
   return 2.35
 }
 
@@ -420,10 +792,11 @@ export function subtreeIds(instances: PlayInstance[], id: string): string[] {
 }
 
 /**
- * Does power actually flow across one wire? The recorded out-port
- * voltage on the parent must lie inside the child's in-port range —
- * exactly what a real cable would do. (Whether the parent itself is
- * powered is a separate, recursive question — see poweredIds.)
+ * Does ELECTRICAL power flow across one wire? Mechanical couplings and
+ * pneumatic tubes carry rotation and air, never electricity — so a link
+ * whose mated ports are in another domain is electrically dead. (Whether
+ * the parent itself is powered is a separate, recursive question — see
+ * poweredIds.)
  */
 function linkCarriesPower(parent: PlayInstance, child: PlayInstance): boolean {
   const out = getPort(parent.kind, child.parentPort)
@@ -431,8 +804,10 @@ function linkCarriesPower(parent: PlayInstance, child: PlayInstance): boolean {
   if (!out || !inP || out.role !== 'out' || inP.role !== 'in') {
     // Ports not recorded (older saves) — resolve them by compatibility.
     const m = connectBetween(parent, child)
-    return m.ok && m.outId === parent.id
+    if (!m.ok || m.outId !== parent.id) return false
+    return domainOf(getPort(parent.kind, m.outPortId) ?? { domain: 'electrical' } as ElecPort) === 'electrical'
   }
+  if (domainOf(out) !== 'electrical' || domainOf(inP) !== 'electrical') return false
   return voltageOk(out, inP)
 }
 
@@ -480,4 +855,154 @@ export function batteriesWithLoad(instances: PlayInstance[]): Set<string> {
     if (linkCarriesPower(parent, inst)) withLoad.add(parent.id)
   }
   return withLoad
+}
+
+/* ------------------------------------------------------------------ */
+/* The mechanical transmission graph                                   */
+/* ------------------------------------------------------------------ */
+
+/** Mechanical interface state for one placed component. */
+export interface MechState {
+  /** True when rotation actually arrives on its input. */
+  driven: boolean
+  /** Rotation arriving at the input (RPM). */
+  inRpm: number
+  /** Rotation leaving via this component’s output shaft/flange (RPM) —
+   *  the input speed divided by the stage’s ratio. */
+  outRpm: number | null
+  /** Linear travel of a ball screw’s nut (mm/s), when applicable. */
+  linearMmS: number | null
+}
+
+/** The component’s own mechanical output port, if it has one. */
+function mechOutPortOf(kind: PlayKind): ElecPort | undefined {
+  return portsFor(kind).find(
+    (p) => domainOf(p) === 'mechanical' && p.role === 'out' && mechOf(p) === 'rotation'
+  )
+}
+
+/** True when the recorded parent→child link is a mechanical coupling. */
+function isMechLink(parent: PlayInstance, child: PlayInstance): boolean {
+  const out = getPort(parent.kind, child.parentPort)
+  const inP = getPort(child.kind, child.childPort)
+  return !!(
+    out &&
+    inP &&
+    domainOf(out) === 'mechanical' &&
+    domainOf(inP) === 'mechanical' &&
+    out.role === 'out' &&
+    inP.role === 'in' &&
+    mechOf(out) === mechOf(inP)
+  )
+}
+
+/**
+ * The mechanical state of every placed component. Prime movers (a
+ * powered, running motor) spin their own output at `rpm`; every stage
+ * coupled to a turning output is driven, and its own output turns at
+ * input ÷ ratio — so a 150 RPM motor through a 100:1 strain wave gear
+ * crawls at 1.5 RPM, and a 5:1 planetary after it at 0.3 RPM, exactly
+ * like the real gear train. Ball screws convert arriving RPM into
+ * linear nut travel via their 4 mm lead.
+ */
+export function drivenStates(
+  instances: PlayInstance[],
+  powered: Set<string>,
+  running: boolean
+): Map<string, MechState> {
+  const byId = new Map(instances.map((i) => [i.id, i]))
+  const states = new Map<string, MechState>()
+
+  const resolve = (inst: PlayInstance): MechState => {
+    const cached = states.get(inst.id)
+    if (cached) return cached
+    const s: MechState = { driven: false, inRpm: 0, outRpm: null, linearMmS: null }
+    states.set(inst.id, s) // set before recursing — cycle guard
+
+    const ownOut = mechOutPortOf(inst.kind)
+    if (ownOut?.rpm != null) {
+      // A prime mover: its shaft turns while it is powered and running.
+      if (running && powered.has(inst.id)) {
+        s.driven = true
+        s.inRpm = ownOut.rpm
+        s.outRpm = ownOut.rpm
+      }
+    } else if (inst.parentId) {
+      const parent = byId.get(inst.parentId)
+      if (parent && isMechLink(parent, inst)) {
+        const ps = resolve(parent)
+        if (ps.driven && ps.outRpm != null) {
+          s.driven = true
+          s.inRpm = ps.outRpm
+          if (ownOut?.ratio != null) {
+            s.outRpm = ps.outRpm / ownOut.ratio
+          } else {
+            const inP = getPort(inst.kind, inst.childPort)
+            if (inP?.pitch != null) {
+              s.linearMmS = (ps.outRpm * inP.pitch) / 60
+            } else {
+              s.outRpm = ps.outRpm
+            }
+          }
+        }
+      }
+    }
+    return s
+  }
+
+  for (const inst of instances) resolve(inst)
+  return states
+}
+
+/* ------------------------------------------------------------------ */
+/* The pneumatic supply graph                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The set of instances with live air: their air port is tubed to the
+ * outlet of a pump that is powered (and the system is running).
+ */
+export function pressurizedIds(
+  instances: PlayInstance[],
+  powered: Set<string>,
+  running: boolean
+): Set<string> {
+  const byId = new Map(instances.map((i) => [i.id, i]))
+  const live = new Set<string>()
+  if (!running) return live
+  for (const inst of instances) {
+    if (!inst.parentId) continue
+    const parent = byId.get(inst.parentId)
+    if (!parent || parent.kind !== 'airpump') continue
+    const out = getPort(parent.kind, inst.parentPort)
+    const inP = getPort(inst.kind, inst.childPort)
+    if (
+      out &&
+      inP &&
+      domainOf(out) === 'pneumatic' &&
+      domainOf(inP) === 'pneumatic' &&
+      out.role === 'out' &&
+      inP.role === 'in' &&
+      voltageOk(out, inP) &&
+      powered.has(parent.id)
+    ) {
+      live.add(inst.id)
+    }
+  }
+  return live
+}
+
+/**
+ * Power sources with a capacitor wired across their terminals — the
+ * rail every consumer on that source shares is smoothed.
+ */
+export function smoothedSourceIds(instances: PlayInstance[], powered: Set<string>): Set<string> {
+  const byId = new Map(instances.map((i) => [i.id, i]))
+  const smoothed = new Set<string>()
+  for (const inst of instances) {
+    if (inst.kind !== 'capacitor' || !inst.parentId || !powered.has(inst.id)) continue
+    const parent = byId.get(inst.parentId)
+    if (parent) smoothed.add(parent.id)
+  }
+  return smoothed
 }

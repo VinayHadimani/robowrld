@@ -23,9 +23,15 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import {
+  drivenStates as computeDrivenStates,
   getPort,
+  isMechanicalKind,
+  isPneumaticKind,
   isPowerSource,
+  portDomain,
   poweredIds as computePoweredIds,
+  pressurizedIds as computePressurizedIds,
+  smoothedSourceIds as computeSmoothedSources,
   type Attach,
   type ConnectRequest,
   type Move,
@@ -85,6 +91,18 @@ export function Playground({
   const answered = useRef(false)
 
   const powered = useMemo(() => computePoweredIds(instances), [instances])
+  // Mechanical transmission: which gear stages are driven and at what RPM.
+  const driven = useMemo(
+    () => computeDrivenStates(instances, powered, running),
+    [instances, powered, running]
+  )
+  // Pneumatic supply: which air parts have live air from a powered pump.
+  const pressurized = useMemo(
+    () => computePressurizedIds(instances, powered, running),
+    [instances, powered, running]
+  )
+  // Power sources whose rail a capacitor is smoothing.
+  const smoothed = useMemo(() => computeSmoothedSources(instances, powered), [instances, powered])
 
   const handleSelect = useCallback((id: string) => {
     setSelectedId((prev) => (prev === id ? null : id))
@@ -138,6 +156,74 @@ export function Playground({
     ? getPort(requestChild.kind, request?.childPort ?? null)
     : undefined
   const ribbon = childPort?.wire === 'ribbon3'
+  const isCoupling = childPort?.wire === 'coupling'
+  const isTubing = childPort?.wire === 'tubing'
+
+  // The honest mechanics of a coupling: what speed arrives, and what the
+  // consumer's own ratio or lead makes of it.
+  const couplingTail = (() => {
+    if (!parentPort || !childPort || !requestChild || !requestParent) return ''
+    if (portDomain(parentPort) !== 'mechanical') return ''
+    if (childPort.pitch != null) {
+      const speed = parentPort.rpm != null ? (parentPort.rpm * childPort.pitch) / 60 : null
+      return ` Every turn advances the nut ${childPort.pitch} mm${
+        speed != null ? ` — ${speed.toFixed(1)} mm/s at this speed` : ''
+      }, turning rotation into straight-line travel.`
+    }
+    if (parentPort.rpm != null) {
+      return ` The driver turns at ${parentPort.rpm} RPM, and the coupling carries that rotation across.`
+    }
+    const outRpm = driven.get(requestParent.id)?.outRpm
+    if (outRpm != null) {
+      return ` The stage ahead turns at ${outRpm.toFixed(1)} RPM — that is what transfers.`
+    }
+    return ' The screw threads in and clamps the parts together.'
+  })()
+
+  // The selected component's honest live state, per energy domain.
+  const selectedState = (() => {
+    if (!selected) return null
+    if (isPowerSource(selected.kind)) {
+      return {
+        label: smoothed.has(selected.id) ? 'Power source · smoothed' : 'Power source',
+        on: true,
+      }
+    }
+    if (selected.kind === 'airpump') {
+      return {
+        label: selectedPowered ? 'Pumping · 0.4 bar' : 'Needs power',
+        on: selectedPowered,
+      }
+    }
+    if (isPneumaticKind(selected.kind)) {
+      const on = pressurized.has(selected.id)
+      return { label: on ? 'Pressurized' : 'Needs air', on }
+    }
+    if (isMechanicalKind(selected.kind)) {
+      const m = driven.get(selected.id)
+      if (m?.driven) {
+        const rate =
+          m.outRpm != null
+            ? `${m.outRpm < 10 ? m.outRpm.toFixed(2) : m.outRpm.toFixed(0)} RPM`
+            : `${m.linearMmS?.toFixed(1)} mm/s`
+        return { label: `Driven · ${rate}`, on: true }
+      }
+      return { label: 'Needs a driver', on: false }
+    }
+    if (selected.kind === 'capacitor') {
+      return { label: selectedPowered ? 'Smoothing the rail' : 'Needs power', on: selectedPowered }
+    }
+    if (selected.kind === 'screw') {
+      return { label: selected.parentId ? 'Fastened' : 'Loose', on: !!selected.parentId }
+    }
+    if (selected.kind === 'rotaryact' || selected.kind === 'linact') {
+      return { label: selectedPowered ? 'Running' : 'Needs power', on: selectedPowered }
+    }
+    if (selected.kind === 'controller') {
+      return { label: selectedPowered ? 'Powered' : 'Needs power', on: selectedPowered }
+    }
+    return { label: selectedPowered ? 'Powered' : 'No power', on: selectedPowered }
+  })()
 
   return (
     <div className="flex h-[calc(100dvh-3rem)] w-full flex-col">
@@ -206,6 +292,8 @@ export function Playground({
           instances={instances}
           running={running}
           poweredIds={powered}
+          drivenStates={driven}
+          pressurizedIds={pressurized}
           selectedId={selectedId}
           groups={groups}
           anchors={anchors}
@@ -220,45 +308,22 @@ export function Playground({
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             <p className="max-w-md rounded-lg bg-background/80 px-4 py-2 text-center text-sm text-muted-foreground backdrop-blur-sm">
               Nothing here yet — add a 9V battery, wire components to its terminals, and make
-              them run. Servos need a controller between them and the battery.
+              them run. Servos need a controller between them and the battery; gears and ball
+              screws need a motor&rsquo;s shaft; muscles and vane motors need the air pump.
             </p>
           </div>
         )}
 
-        {selected && (
+        {selected && selectedState && (
           <div className="absolute bottom-4 left-4 flex items-center gap-3 rounded-lg border bg-background/95 px-4 py-2 shadow-sm">
             <span className="text-sm font-medium">{selected.name}</span>
             <span
               className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs ${
-                isPowerSource(selected.kind)
-                  ? 'bg-emerald-100 text-emerald-800'
-                  : selected.kind === 'controller'
-                    ? powered.has(selected.id)
-                      ? 'bg-emerald-100 text-emerald-800'
-                      : 'bg-muted text-muted-foreground'
-                    : selectedPowered
-                      ? 'bg-emerald-100 text-emerald-800'
-                      : 'bg-muted text-muted-foreground'
+                selectedState.on ? 'bg-emerald-100 text-emerald-800' : 'bg-muted text-muted-foreground'
               }`}
             >
-              {isPowerSource(selected.kind) ? (
-                <>
-                  <PlugZap className="h-3 w-3" aria-hidden />
-                  Power source
-                </>
-              ) : selected.kind === 'controller' ? (
-                <>
-                  <PlugZap className="h-3 w-3" aria-hidden />
-                  {powered.has(selected.id) ? 'Powered' : 'Needs power'}
-                </>
-              ) : selectedPowered ? (
-                <>
-                  <PlugZap className="h-3 w-3" aria-hidden />
-                  Powered
-                </>
-              ) : (
-                'No power'
-              )}
+              <PlugZap className="h-3 w-3" aria-hidden />
+              {selectedState.label}
             </span>
             {selected.parentId && (
               <Button
@@ -302,11 +367,28 @@ export function Playground({
               Connect {requestChild?.name ?? 'this component'} to {requestParent?.name ?? 'that one'}?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              This wires the {requestChild?.name ?? 'component'}&rsquo;s{' '}
-              {childPort?.label ?? 'power leads'} to the {requestParent?.name ?? 'other part'}&rsquo;s{' '}
-              {parentPort?.label ?? 'terminals'}
-              {ribbon ? ' with a 3-wire signal cable.' : ' — red to +, black to −.'} Only
-              components with a real power path to a battery run.
+              {isCoupling ? (
+                <>
+                  This couples the {requestParent?.name ?? 'part'}&rsquo;s {parentPort?.label ?? 'shaft'} to the{' '}
+                  {requestChild?.name ?? 'component'}&rsquo;s {childPort?.label ?? 'input'} with a rigid steel
+                  coupling.{couplingTail} Rotation only flows while the driver is powered.
+                </>
+              ) : isTubing ? (
+                <>
+                  This runs a pneumatic tube from the {requestParent?.name ?? 'part'}&rsquo;s{' '}
+                  {parentPort?.label ?? 'nozzle'} to the {requestChild?.name ?? 'component'}&rsquo;s{' '}
+                  {childPort?.label ?? 'air port'} — up to 0.4 bar of air flows while the pump is
+                  powered. No electricity crosses this tube.
+                </>
+              ) : (
+                <>
+                  This wires the {requestChild?.name ?? 'component'}&rsquo;s{' '}
+                  {childPort?.label ?? 'power leads'} to the {requestParent?.name ?? 'other part'}&rsquo;s{' '}
+                  {parentPort?.label ?? 'terminals'}
+                  {ribbon ? ' with a 3-wire signal cable.' : ' — red to +, black to −.'} Only
+                  components with a real power path to a battery run.
+                </>
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

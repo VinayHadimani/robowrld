@@ -53,6 +53,16 @@ import { HcSr04, HCSR04_HEADER } from '@/components/three/HcSr04'
 import { IrSensor, IR_HEADER } from '@/components/three/IrSensor'
 import { EscBoard, ESC_ANCHORS } from '@/components/three/EscBoard'
 import { LipoPack, LIPO_XT60 } from '@/components/three/LipoPack'
+import { StrainWaveGear, STRAINWAVE_ANCHORS } from '@/components/three/StrainWaveGear'
+import { PlanetaryGear, PLANETARY_ANCHORS } from '@/components/three/PlanetaryGear'
+import { PneumaticMuscle, MUSCLE_ANCHORS } from '@/components/three/PneumaticMuscle'
+import { Capacitor, CAPACITOR_ANCHORS } from '@/components/three/Capacitor'
+import { SmallScrew, SCREW_ANCHORS } from '@/components/three/SmallScrew'
+import { RotaryActuator, ROTARY_ANCHORS } from '@/components/three/RotaryActuator'
+import { LinearActuator, LINACT_ANCHORS } from '@/components/three/LinearActuator'
+import { BallScrew, BALLSCREW_ANCHORS } from '@/components/three/BallScrew'
+import { VaneActuator, VANE_ANCHORS } from '@/components/three/VaneActuator'
+import { AirPump, AIRPUMP_ANCHORS } from '@/components/three/AirPump'
 import {
   ELEC_PORTS,
   connectBetween,
@@ -62,6 +72,7 @@ import {
   sweepFor,
   subtreeIds,
   type Attach,
+  type MechState,
   type Move,
   type PlayInstance,
 } from '@/lib/playground'
@@ -141,7 +152,9 @@ class LoadBoundary extends React.Component<
  * to their components even during imperative (mid-drag) moves, at zero
  * React render cost. `offsetA` shifts the provider-side clip point
  * (battery terminal fan-out); ribbon wires shift perpendicular to the
- * run so the three leads sit side by side like a flat cable.
+ * run so the three leads sit side by side like a flat cable. The
+ * `tubing` variant renders the pneumatic PU hose: translucent, blue,
+ * no glow — air, not electricity.
  */
 function Cable({
   anchors,
@@ -155,6 +168,8 @@ function Cable({
   spread,
   lateral,
   radius,
+  tubing = false,
+  bow = BOW,
 }: {
   anchors: React.RefObject<AnchorMap>
   parentId: string
@@ -170,6 +185,10 @@ function Cable({
   /** Consumer-side perpendicular offset (ribbon wires; world space). */
   lateral: number
   radius: number
+  /** Pneumatic hose variant: translucent, sagging, never glowing. */
+  tubing?: boolean
+  /** How far the run bows sideways, clearing the source body. */
+  bow?: number
 }) {
   const mesh = useRef<THREE.Mesh>(null)
   const lastA = useRef(new THREE.Vector3(1e9, 1e9, 1e9))
@@ -234,8 +253,8 @@ function Cable({
       const camZ = state.camera.position.z
       const toCam = (camX - tmp.mid.x) * tmp.perp.x + (camZ - tmp.mid.z) * tmp.perp.z
       const sign = toCam >= 0 ? 1 : -1
-      bowX = tmp.perp.x * sign * BOW
-      bowZ = tmp.perp.z * sign * BOW
+      bowX = tmp.perp.x * sign * bow
+      bowZ = tmp.perp.z * sign * bow
     }
     tmp.ctrl.set(tmp.mid.x + bowX, sagY, tmp.mid.z + bowZ)
     const curve = new THREE.QuadraticBezierCurve3(
@@ -250,21 +269,103 @@ function Cable({
 
   return (
     <mesh ref={mesh}>
-      <meshStandardMaterial
-        color={color}
-        roughness={0.38}
-        metalness={0.12}
-        emissive={live ? '#b91c1c' : '#000000'}
-        emissiveIntensity={live ? (side === 'red' ? 0.85 : 0.3) : 0}
-      />
+      {tubing ? (
+        <meshStandardMaterial
+          color={color}
+          roughness={0.22}
+          metalness={0}
+          transparent
+          opacity={0.62}
+        />
+      ) : (
+        <meshStandardMaterial
+          color={color}
+          roughness={0.38}
+          metalness={0.12}
+          emissive={live ? '#b91c1c' : '#000000'}
+          emissiveIntensity={live ? (side === 'red' ? 0.85 : 0.3) : 0}
+        />
+      )}
     </mesh>
   )
 }
 
 /**
+ * The rigid steel COUPLING between two mated mechanical ports — a
+ * clamp sleeve bridging the provider’s shaft to the consumer’s input,
+ * with a hex collar at each end. Straight and rigid: it carries
+ * rotation, not slack. Rebuilt imperatively each frame so it survives
+ * imperative (mid-drag) group moves like the cables do.
+ */
+function CouplingLink({
+  anchors,
+  parentId,
+  parentPortId,
+  childId,
+  childPortId,
+  radius = 0.32,
+}: {
+  anchors: React.RefObject<AnchorMap>
+  parentId: string
+  parentPortId: string
+  childId: string
+  childPortId: string
+  radius?: number
+}) {
+  const group = useRef<THREE.Group>(null)
+  const sleeve = useRef<THREE.Mesh>(null)
+  const collarA = useRef<THREE.Mesh>(null)
+  const collarB = useRef<THREE.Mesh>(null)
+  const tmp = useMemo(
+    () => ({ a: new THREE.Vector3(), b: new THREE.Vector3(), dir: new THREE.Vector3(), up: new THREE.Vector3(0, 1, 0) }),
+    []
+  )
+
+  useFrame(() => {
+    const g = group.current
+    if (!g) return
+    const parentPort = anchors.current?.get(parentId)?.get(parentPortId)
+    const childPort = anchors.current?.get(childId)?.get(childPortId)
+    if (!parentPort || !childPort) {
+      g.visible = false
+      return
+    }
+    g.visible = true
+    parentPort.red.getWorldPosition(tmp.a)
+    childPort.red.getWorldPosition(tmp.b)
+    tmp.dir.subVectors(tmp.b, tmp.a)
+    const len = tmp.dir.length()
+    g.position.copy(tmp.a).add(tmp.b).multiplyScalar(0.5)
+    if (len > 1e-4) g.quaternion.setFromUnitVectors(tmp.up, tmp.dir.normalize())
+    if (sleeve.current) sleeve.current.scale.y = Math.max(len, 0.08)
+    const inset = Math.max(len / 2 - 0.16, 0.04)
+    if (collarA.current) collarA.current.position.y = inset
+    if (collarB.current) collarB.current.position.y = -inset
+  })
+
+  return (
+    <group ref={group}>
+      <mesh ref={sleeve} castShadow>
+        <cylinderGeometry args={[radius, radius, 1, 20]} />
+        <meshStandardMaterial color="#8d9299" metalness={0.88} roughness={0.32} />
+      </mesh>
+      <mesh ref={collarA} castShadow>
+        <cylinderGeometry args={[radius + 0.1, radius + 0.1, 0.24, 6]} />
+        <meshStandardMaterial color="#6f757d" metalness={0.88} roughness={0.35} />
+      </mesh>
+      <mesh ref={collarB} castShadow>
+        <cylinderGeometry args={[radius + 0.1, radius + 0.1, 0.24, 6]} />
+        <meshStandardMaterial color="#6f757d" metalness={0.88} roughness={0.35} />
+      </mesh>
+    </group>
+  )
+}
+
+/**
  * The cable(s) for one wired link, styled by the consumer's port:
- * a red + black power pair for splices, or an orange/red/brown 3-wire
- * ribbon for servo-style signal leads.
+ * a red + black power pair for splices, an orange/red/brown 3-wire
+ * ribbon for servo-style signal leads, a rigid steel coupling sleeve
+ * for shafts and screws, or translucent blue tubing for air.
  */
 function LinkWire({
   anchors,
@@ -281,11 +382,41 @@ function LinkWire({
   parentPortId: string
   childId: string
   childPortId: string
-  wire: 'pair' | 'ribbon3'
+  wire: 'pair' | 'ribbon3' | 'coupling' | 'tubing'
   live: boolean
   /** Fan-out index at the provider's terminal (multiple consumers). */
   spread: number
 }) {
+  if (wire === 'coupling') {
+    return (
+      <CouplingLink
+        anchors={anchors}
+        parentId={parentId}
+        parentPortId={parentPortId}
+        childId={childId}
+        childPortId={childPortId}
+      />
+    )
+  }
+  if (wire === 'tubing') {
+    return (
+      <Cable
+        anchors={anchors}
+        parentId={parentId}
+        parentPortId={parentPortId}
+        childId={childId}
+        childPortId={childPortId}
+        side="red"
+        color="#8fc4ee"
+        live={live}
+        spread={0}
+        lateral={0}
+        radius={0.09}
+        tubing
+        bow={0.85}
+      />
+    )
+  }
   if (wire === 'ribbon3') {
     return (
       <>
@@ -443,33 +574,80 @@ function usePortAnchors(
       // The XT60 leads at the pack's end.
       addPair('xt60', LIPO_XT60.plus, LIPO_XT60.minus)
     } else if (inst.kind === 'controller') {
-      // VIN jack (pair) + 5 V pin header (servo ribbon).
+      // VIN jack (pair) + 5 V pin header (servo ribbon) + M3 mount hole.
       addPair('vin', ARDUINO_ANCHORS.vin.plus, ARDUINO_ANCHORS.vin.minus)
       addSingle('hdr', ARDUINO_ANCHORS.header)
+      addSingle('mount', [3.0, 0.14, -2.0])
     } else if (inst.kind === 'esc') {
       // Battery-in pair + motor-out pair + BEC signal lead.
       addPair('pwr', ESC_ANCHORS.pwr.plus, ESC_ANCHORS.pwr.minus)
       addPair('moto', ESC_ANCHORS.moto.plus, ESC_ANCHORS.moto.minus)
       addSingle('bec', ESC_ANCHORS.bec)
     } else if (inst.kind === 'servo') {
-      // The cable exit grommet on the rear face of the body.
+      // Cable exit grommet + spline horn + a mounting tab.
       addSingle('plug', SERVO_CABLE_EXIT)
+      addSingle('horn', [1.15, 4.7, 0])
+      addSingle('tabs', [2.32, 3.28, 0])
     } else if (inst.kind === 'dcmotor') {
-      // The solder-tab leads at the rear cap.
+      // Solder-tab leads + the 6 mm output shaft tip + a face hole.
       addPair('leads', DC_MOTOR_LEADS.plus, DC_MOTOR_LEADS.minus)
+      addSingle('shaft', [4.28, 1.85, 0])
+      addSingle('mount', [2.97, 1.85, 1.42])
     } else if (inst.kind === 'stepper') {
-      // The 4-wire driver lead at the rear.
+      // The 4-wire driver lead at the rear + shaft top + flange hole.
       addPair(
         'leads',
         [STEPPER_CABLE_EXIT[0] - 0.9, STEPPER_CABLE_EXIT[1], 0.3],
         [STEPPER_CABLE_EXIT[0] - 0.9, STEPPER_CABLE_EXIT[1], -0.3]
       )
+      addSingle('shaft', [0, 4.95, 0])
+      addSingle('mount', [1.75, 0.4, 1.75])
     } else if (inst.kind === 'ultrasonic') {
       // The 4-pin header on the back edge.
       addPair('hdr', HCSR04_HEADER.plus, HCSR04_HEADER.minus)
     } else if (inst.kind === 'irsensor') {
       // The 3-pin header on the back edge.
       addPair('hdr', IR_HEADER.plus, IR_HEADER.minus)
+    } else if (inst.kind === 'strainwave') {
+      // Wave-generator input shaft, flexspline output flange, mount bolts.
+      addSingle('input', STRAINWAVE_ANCHORS.input)
+      addSingle('output', STRAINWAVE_ANCHORS.output)
+      addSingle('mount', STRAINWAVE_ANCHORS.mount)
+    } else if (inst.kind === 'planetary') {
+      // Sun input shaft below, carrier output shaft above.
+      addSingle('input', PLANETARY_ANCHORS.input)
+      addSingle('output', PLANETARY_ANCHORS.output)
+    } else if (inst.kind === 'muscle') {
+      // The brass air inlet stub at the fitting end.
+      addSingle('port', MUSCLE_ANCHORS.port)
+    } else if (inst.kind === 'vaneact') {
+      // The drive-side air fitting + a body bolt hole.
+      addSingle('port', VANE_ANCHORS.port)
+      addSingle('mount', VANE_ANCHORS.mount)
+    } else if (inst.kind === 'capacitor') {
+      // The two legs — red wire to +, black to − (minus stripe side).
+      addPair('legs', CAPACITOR_ANCHORS.plus, CAPACITOR_ANCHORS.minus)
+    } else if (inst.kind === 'screw') {
+      // The threaded tip — where a fastening lands.
+      addSingle('thread', SCREW_ANCHORS.thread)
+    } else if (inst.kind === 'rotaryact') {
+      // Power leads + keyed output shaft + flange holes.
+      addPair('leads', ROTARY_ANCHORS.plus, ROTARY_ANCHORS.minus)
+      addSingle('shaft', ROTARY_ANCHORS.shaft)
+      addSingle('mount', ROTARY_ANCHORS.mount)
+    } else if (inst.kind === 'linact') {
+      // Power leads + the mounting slot on top of the profile.
+      addPair('leads', LINACT_ANCHORS.plus, LINACT_ANCHORS.minus)
+      addSingle('mount', LINACT_ANCHORS.mount)
+    } else if (inst.kind === 'ballscrew') {
+      // Driven journal, ball-nut flange, a bearing-block hole.
+      addSingle('journal', BALLSCREW_ANCHORS.journal)
+      addSingle('nut', BALLSCREW_ANCHORS.nut)
+      addSingle('mount', BALLSCREW_ANCHORS.mountA)
+    } else if (inst.kind === 'airpump') {
+      // Power leads + the brass outlet nozzle.
+      addPair('leads', AIRPUMP_ANCHORS.plus, AIRPUMP_ANCHORS.minus)
+      addSingle('air', AIRPUMP_ANCHORS.air)
     } else {
       // Uploaded models: nominal power lead posts on top.
       const y = 2.35
@@ -488,6 +666,8 @@ function Instance({
   inst,
   running,
   powered,
+  drivenState,
+  pressurized,
   selected,
   candidate,
   groups,
@@ -497,6 +677,10 @@ function Instance({
   inst: PlayInstance
   running: boolean
   powered: boolean
+  /** Mechanical transmission state (rotation arriving / leaving). */
+  drivenState?: MechState
+  /** True while live air arrives (pneumatic parts). */
+  pressurized?: boolean
   selected: boolean
   candidate: LiveCandidate | null
   groups: React.RefObject<Map<string, THREE.Group>>
@@ -516,6 +700,7 @@ function Instance({
   usePortAnchors(ref, inst, anchors)
 
   const live = running && powered
+  const mech = drivenState ?? { driven: false, inRpm: 0, outRpm: null, linearMmS: null }
   const ringRadius = footprintFor(inst.kind)
 
   return (
@@ -554,6 +739,26 @@ function Instance({
         <HcSr04 position={[0, 0.03, 0]} />
       ) : inst.kind === 'irsensor' ? (
         <IrSensor position={[0, 0.03, 0]} powered={running && powered} />
+      ) : inst.kind === 'strainwave' ? (
+        <StrainWaveGear position={[0, 0.03, 0]} driven={mech.driven} inputRpm={mech.inRpm} />
+      ) : inst.kind === 'planetary' ? (
+        <PlanetaryGear position={[0, 0.03, 0]} driven={mech.driven} inputRpm={mech.inRpm} />
+      ) : inst.kind === 'ballscrew' ? (
+        <BallScrew position={[0, 0.03, 0]} driven={mech.driven} inputRpm={mech.inRpm} />
+      ) : inst.kind === 'muscle' ? (
+        <PneumaticMuscle position={[0, 0.03, 0]} pressurized={pressurized} />
+      ) : inst.kind === 'vaneact' ? (
+        <VaneActuator position={[0, 0.03, 0]} pressurized={pressurized} />
+      ) : inst.kind === 'capacitor' ? (
+        <Capacitor position={[0, 0.03, 0]} charged={running && powered} />
+      ) : inst.kind === 'screw' ? (
+        <SmallScrew position={[0, 0.03, 0]} />
+      ) : inst.kind === 'rotaryact' ? (
+        <RotaryActuator position={[0, 0.03, 0]} running={live} />
+      ) : inst.kind === 'linact' ? (
+        <LinearActuator position={[0, 0.03, 0]} running={live} />
+      ) : inst.kind === 'airpump' ? (
+        <AirPump position={[0, 0.03, 0]} running={live} />
       ) : inst.modelUrl ? (
         <SpinGroup running={live}>
           <Suspense fallback={null}>
@@ -573,6 +778,8 @@ function Scene({
   instances,
   running,
   poweredIds,
+  drivenStates,
+  pressurizedIds,
   selectedId,
   groups,
   anchors,
@@ -585,6 +792,10 @@ function Scene({
   instances: PlayInstance[]
   running: boolean
   poweredIds: Set<string>
+  /** Mechanical transmission state per instance. */
+  drivenStates: Map<string, MechState>
+  /** Instances with live air arriving. */
+  pressurizedIds: Set<string>
   selectedId: string | null
   groups: React.RefObject<Map<string, THREE.Group>>
   anchors: React.RefObject<AnchorMap>
@@ -911,6 +1122,8 @@ function Scene({
           inst={inst}
           running={running}
           powered={poweredIds.has(inst.id)}
+          drivenState={drivenStates.get(inst.id)}
+          pressurized={pressurizedIds.has(inst.id)}
           selected={inst.id === selectedId}
           candidate={candidate}
           groups={groups}
@@ -919,11 +1132,14 @@ function Scene({
         />
       ))}
 
-      {/* Cables for every wired link — between the REAL mated ports */}
+      {/* Cables for every wired link — between the REAL mated ports.
+          Electrical links render wires; mechanical links render the
+          steel coupling sleeve; pneumatic links render blue tubing. */}
       {instances
         .filter((i) => i.parentId)
         .map((i) => {
           const inPort = getPort(i.kind, i.childPort) ?? ELEC_PORTS[i.kind]?.[0]
+          const isTubing = inPort?.wire === 'tubing'
           return (
             <LinkWire
               key={`wire-${i.id}`}
@@ -933,7 +1149,10 @@ function Scene({
               childId={i.id}
               childPortId={i.childPort ?? inPort?.id ?? 'leads'}
               wire={inPort?.wire ?? 'pair'}
-              live={running && poweredIds.has(i.id)}
+              live={
+                running &&
+                (isTubing ? pressurizedIds.has(i.id) : poweredIds.has(i.id))
+              }
               spread={terminalSpread.get(i.id) ?? 0}
             />
           )
@@ -958,6 +1177,8 @@ export default function PlaygroundStage({
   instances,
   running,
   poweredIds,
+  drivenStates,
+  pressurizedIds,
   selectedId,
   groups,
   anchors,
@@ -970,6 +1191,10 @@ export default function PlaygroundStage({
   instances: PlayInstance[]
   running: boolean
   poweredIds: Set<string>
+  /** Mechanical transmission state per instance. */
+  drivenStates: Map<string, MechState>
+  /** Instances with live air arriving. */
+  pressurizedIds: Set<string>
   selectedId: string | null
   groups: React.RefObject<Map<string, THREE.Group>>
   anchors: React.RefObject<AnchorMap>
@@ -995,6 +1220,8 @@ export default function PlaygroundStage({
         instances={instances}
         running={running}
         poweredIds={poweredIds}
+        drivenStates={drivenStates}
+        pressurizedIds={pressurizedIds}
         selectedId={selectedId}
         groups={groups}
         anchors={anchors}

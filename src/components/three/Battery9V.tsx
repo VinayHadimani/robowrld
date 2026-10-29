@@ -186,7 +186,7 @@ export function Battery9V({
       wrap(face),
       wrap(back),
     ]
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [])
 
   useEffect(() => {

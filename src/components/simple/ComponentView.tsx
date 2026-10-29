@@ -66,7 +66,27 @@ export function ComponentView({
                       ? 'The 11.1 V tank — powers ESCs and controllers through its XT60.'
                       : c.kind === 'stepper'
                         ? 'Needs a current-controlled driver board — it never wires straight to a battery.'
-                        : 'Drag to orbit · scroll to zoom.'}
+                        : c.kind === 'strainwave'
+                          ? 'Couple a motor’s shaft into the wave generator — the flexspline crawls at 1/100th the speed.'
+                          : c.kind === 'planetary'
+                            ? 'Drive the sun gear — the carrier creeps out at 1/5th speed, three planets sharing the load.'
+                            : c.kind === 'ballscrew'
+                              ? 'Couple a motor onto the journal — the ball nut glides along at 4 mm per turn.'
+                              : c.kind === 'muscle'
+                                ? 'Feed it air from the mini pump — the braid contracts and it pulls.'
+                                : c.kind === 'vaneact'
+                                  ? 'Feed it air — the shaft swings through its 270° arc and holds on the stop.'
+                                  : c.kind === 'airpump'
+                                    ? 'Wire it to the 9V battery — its nozzle feeds air to muscles and vane motors.'
+                                    : c.kind === 'capacitor'
+                                      ? 'Clip it across a battery’s terminals — it smooths that rail for everything on it.'
+                                      : c.kind === 'screw'
+                                        ? 'Thread it into any M3 hole — the fastener that holds robots together.'
+                                        : c.kind === 'rotaryact'
+                                          ? 'Wire it to the battery — the keyed shaft turns continuously at 30 RPM.'
+                                          : c.kind === 'linact'
+                                            ? 'Wire it to the battery — the chrome rod pushes and pulls at 12 mm/s.'
+                                            : 'Drag to orbit · scroll to zoom.'}
           </p>
         </div>
 
